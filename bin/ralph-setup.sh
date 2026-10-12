@@ -9,6 +9,9 @@ set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
       GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
 
+# 雛形は ralph-kit から読む（各リポジトリの scripts/ralph-kit.sh が、取得した kit の場所を RALPH_KIT_DIR に入れて呼ぶ）
+KIT_DIR="${RALPH_KIT_DIR:-$(cd "$(dirname "$0")/.." && pwd -P)}"
+
 INTEGRATION="${1:-}"
 if [[ -z "$INTEGRATION" ]]; then
   echo "統合ブランチ名を指定してください（例: epic/monetization）" >&2
@@ -138,20 +141,20 @@ if [[ -f "$LOCAL_PB" ]]; then
   # テンプレートは初回しかコピーしない（置換済みの playbook を壊さないため）。
   # そのため改善が既存の制御用 worktree に届かない。見出し単位で不足を報告する。
   MISSING=$(comm -23 \
-    <(grep -E '^#{2,3} ' .claude/ralph/playbook.template.md | sort -u) \
+    <(grep -E '^#{2,3} ' "$KIT_DIR/playbook.md" | sort -u) \
     <(grep -E '^#{2,3} ' "$LOCAL_PB" | sort -u) || true)
   if [[ -n "$MISSING" ]]; then
     echo "注意: 既存の playbook にテンプレートの節がありません。手で取り込んでください:" >&2
     echo "$MISSING" | sed 's/^/      /' >&2
-    echo "      元: $REPO_ROOT/.claude/ralph/playbook.template.md" >&2
+    echo "      元: $KIT_DIR/playbook.md" >&2
   fi
 else
-  cp .claude/ralph/playbook.template.md "$LOCAL_PB"
+  cp "$KIT_DIR/playbook.md" "$LOCAL_PB"
 fi
 [[ -f "$CTL/.claude/ralph-goal.local.md" ]] \
-  || cp .claude/ralph/goal.template.md "$CTL/.claude/ralph-goal.local.md"
+  || cp "$KIT_DIR/templates/goal.md" "$CTL/.claude/ralph-goal.local.md"
 [[ -f "$CTL/.claude/ralph-state.local.md" ]] \
-  || cp .claude/ralph/state.template.md "$CTL/.claude/ralph-state.local.md"
+  || cp "$KIT_DIR/templates/state.md" "$CTL/.claude/ralph-state.local.md"
 # 既存の settings.json にテンプレートの deny が欠けていたら足す（git 管理下の settings.json なら止める）。
 # bypassPermissions で動くループにとって、deny は禁止操作を止める最初の層だから。
 # テンプレートに deny を足したとき、前から使っている制御用 worktree の再開を止めずに行き渡らせる
@@ -165,14 +168,14 @@ check_deny() {
   local missing
   missing=$(jq -r --slurpfile have "$settings" \
     '.permissions.deny - ($have[0].permissions.deny // []) | .[]' \
-    .claude/ralph/settings.deny.example.json) \
+    "$KIT_DIR/templates/settings.deny.json") \
     || { echo "エラー: $settings を JSON として読めません" >&2; exit 1; }
   [[ -n "$missing" ]] || return 0
   if [[ "$mode" == add ]]; then
     local merged
     merged=$(mktemp "$settings.XXXXXX") \
       || { echo "エラー: $settings の隣に一時ファイルを作れませんでした" >&2; exit 1; }
-    if jq --slurpfile template .claude/ralph/settings.deny.example.json \
+    if jq --slurpfile template "$KIT_DIR/templates/settings.deny.json" \
       '.permissions.deny = ((.permissions.deny // []) + ($template[0].permissions.deny - (.permissions.deny // [])))' \
       "$settings" > "$merged" \
       && jq -e '.permissions.deny | type == "array" and length > 0 and all(.[]; type == "string")' "$merged" >/dev/null; then
@@ -223,7 +226,7 @@ else
   elif [[ -f "$CTL/.claude/settings.json" ]]; then
     check_deny "$CTL/.claude/settings.json"
   else
-    cp .claude/ralph/settings.deny.example.json "$CTL/.claude/settings.json"
+    cp "$KIT_DIR/templates/settings.deny.json" "$CTL/.claude/settings.json"
   fi
   # 既存の settings.json も git 管理外なら除外する。コピーした時だけにすると、
   # 手で置いた settings.json が git add -A で統合ブランチに載ってしまう
@@ -237,11 +240,11 @@ fi
 # 警告が消えるのを避けるため。見出しはスニペット側から読み、定義の二重化を避ける。
 # ループのセッションは制御用 worktree で起動するので、実行元ではなくそちらの CLAUDE.md を見る。
 # 実行元のブランチにだけ記載があっても、統合ブランチに無ければ新しいセッションには届かない。
-MARKER=$(grep -m1 '^## ' .claude/ralph/CLAUDE.snippet.md 2>/dev/null || true)
+MARKER=$(grep -m1 '^## ' "$KIT_DIR/templates/CLAUDE.snippet.md" 2>/dev/null || true)
 MARKER=${MARKER:-'## ralph-loop による自律開発'}
 if [[ ! -f "$CTL/CLAUDE.md" ]] || ! grep -qF "$MARKER" "$CTL/CLAUDE.md"; then
   echo "警告: 制御用 worktree の CLAUDE.md に ralph-loop の記載がありません（${INTEGRATION}）。" >&2
-  echo "      .claude/ralph/CLAUDE.snippet.md を $INTEGRATION の CLAUDE.md に追記してください" >&2
+  echo "      $KIT_DIR/templates/CLAUDE.snippet.md の内容を $INTEGRATION の CLAUDE.md に追記してください" >&2
   echo "      （無いと、新しいセッションがこの仕組みに気づけません）" >&2
 fi
 

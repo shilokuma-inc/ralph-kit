@@ -23,6 +23,9 @@ set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
       GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
 
+# ralph-setup.sh・ralph-start.sh は、同じ版の ralph-kit のものを呼ぶ（各リポジトリの scripts/ralph-kit.sh が、取得した kit の場所を RALPH_KIT_DIR に入れて呼ぶ）
+KIT_DIR="${RALPH_KIT_DIR:-$(cd "$(dirname "$0")/.." && pwd -P)}"
+
 COMMAND="${1:-}"
 [[ $# -gt 0 ]] && shift
 
@@ -309,7 +312,7 @@ launch_loop() {
     trap 'exit 130' INT TERM
   fi
   permission_mode=$(loop_permission_mode) || exit 1
-  (cd "$CTL" && "$MAIN/scripts/ralph-start.sh" "$promise" >/dev/null)
+  (cd "$CTL" && "$KIT_DIR/bin/ralph-start.sh" "$promise" >/dev/null)
   [[ -f "$LOOP_STATE" ]] || fail "state ファイルを作れませんでした: $LOOP_STATE"
   # 新しい state を作り終えてから、よけた state を消す（ralph-start.sh が失敗したときも元に戻せるように）
   if [[ -n "$saved_state" ]]; then
@@ -378,7 +381,7 @@ case "$COMMAND" in
     if [[ -n "$PREVIOUS" && "$PREVIOUS" != "$DISCUSSION" && -f "$LOOP_STATE" ]]; then
       fail "制御用 worktree で Discussion #$PREVIOUS の手動ループが途中です。終わってから始めてください"
     fi
-    (cd "$MAIN" && scripts/ralph-setup.sh "$EPIC" "$BASE_BRANCH" >/dev/null)
+    (cd "$MAIN" && "$KIT_DIR/bin/ralph-setup.sh" "$EPIC" "$BASE_BRANCH" >/dev/null)
     # 子 PR の base になるので、epic を origin に置いておく（ralph-setup.sh は push しない）
     git -C "$MAIN" push --quiet -u origin "$EPIC" || fail "$EPIC を origin に push できません"
     # 準備と push が済んでから ready-for-loop を外す（途中で失敗したとき、ラベルだけ外れた状態を残さない）
@@ -395,7 +398,7 @@ case "$COMMAND" in
 制御用 worktree: $CTL
 
 次に行うこと（Claude Code）:
-  1. $PLAYBOOK の {{...}} をすべて埋める（.claude/ralph/README.md の「使い方」）。
+  1. $PLAYBOOK の {{...}} をすべて埋める（ralph-kit の README.md の「使い方」。$KIT_DIR/README.md）。
      - TRUSTED_AUTHORS: $TRUSTED
      - GOAL_SOURCE: Discussion #$DISCUSSION
      - INTEGRATION_BRANCH: $EPIC / BASE_BRANCH: $BASE_BRANCH
@@ -428,7 +431,7 @@ NEXT
     [[ -n "$PROMISE" ]] || fail "完了語の記録がありません（launch で起動してください）"
     EPIC=$(state_get epic)
     # 片付け済みのスロットを作り直す（ralph-setup.sh は既存の worktree を再利用する）
-    (cd "$MAIN" && scripts/ralph-setup.sh "$EPIC" "$BASE_BRANCH" >/dev/null)
+    (cd "$MAIN" && "$KIT_DIR/bin/ralph-setup.sh" "$EPIC" "$BASE_BRANCH" >/dev/null)
     refresh_trusted_authors "$(trusted_authors)"
     launch_loop "$PROMISE"
     ;;
