@@ -51,7 +51,9 @@ install.sh                      リポジトリに中継を入れる・ずれを
 
 - **互換を保つ修正は、kit に PR を 1 本出すだけで全リポジトリに届く。** `VERSION` を上げた PR が main に入ると、
   ワークフロー（`release.yml`）が `vX.Y.Z` のタグを打ち、`v1` をそのコミットに動かす。各リポジトリへの PR は要らない
-- タグ・ブランチは 5 分おきに取り直す（`RALPH_KIT_FETCH_INTERVAL`）。取得できないときは手元にある版で動く
+- タグ・ブランチは 5 分おきに取り直す（`RALPH_KIT_FETCH_INTERVAL`）。取得できないとき・ほかのプロセスの取得が 2 分を超えて終わらないときは、手元にある版で動く
+- **中継（`scripts/ralph-kit.sh`）の処理も kit の版に従う。** 取得した kit の `shim/scripts/ralph-kit.sh` が各リポジトリのものと違えば、処理をそちらに任せる。
+  各リポジトリのコピーが使われるのは、kit の取得と、任せるかどうかの判定だけになる
 - **ループは起動したときの版の kit を使い続ける。** `askhub-manual.sh launch` / `resume` は、起動する claude に
   `RALPH_KIT_DIR`（取得した kit の場所）を渡すので、周回中に呼ぶ `scripts/askhub-manual.sh status` も同じ版を使う。新しい版は次の起動から効く
 - 互換を崩す変更（中継・`kit.conf`・ワークフローの呼び出しの形を変えるもの）は `v2` にし、各リポジトリの `kit.conf` を書き換える
