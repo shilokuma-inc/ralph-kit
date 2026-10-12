@@ -13,6 +13,8 @@ shilokuma-inc の各アプリのリポジトリで使う ralph-loop 一式の正
   テストは HEAD のコミットを取得して流すので、コミットしてから流す
 - 振る舞いを変えたら `CHANGELOG.md` に書き、`VERSION` を上げる（互換を保つならマイナーかパッチ）。`VERSION` を上げた PR のマージで
   `release.yml` がタグを打つ。上げない PR はタグを動かさない（docs だけの変更など）
+- playbook は、起動のたびに各ループの playbook へ 3-way merge で取り込まれる。**プレースホルダ（`{{...}}`）のある行と、その前後の行は
+  なるべく書き換えない**（各ループでは埋めてあるので衝突し、その更新は取り込まれない）。新しいプレースホルダは足さない（取り込まれない）
 - playbook の手順を変えたら、オーケストレーター（shilokuma-inc/ask-hub-apple の `scripts/orchestrator/` と `AskHubKit`）が
   同じ目印・ラベル・ファイル名を読んでいないか確かめる（`ask-hub:*` の目印、`※回答待ち`・`※保留` の書式、`.claude/*.local.*` のファイル名）
 
