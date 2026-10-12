@@ -23,6 +23,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # CI は push しないので、checkout のトークンを .git/config に残さない
+          persist-credentials: false
       # info・style はテンプレートから引き継いだ書き方が多いので、warning 以上で落とす
       - name: ShellCheck
         run: shellcheck -S warning bin/*.sh shim/scripts/*.sh install.sh tests/run.sh
