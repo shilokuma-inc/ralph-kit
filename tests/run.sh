@@ -103,6 +103,15 @@ if "$KIT/install.sh" --check "$APP" >/dev/null; then fail "--check が中継の�
 "$KIT/install.sh" "$APP" >/dev/null
 ok "--check が中継のずれを報告し、install.sh で元に戻る"
 
+# 処理を kit に任せられる scripts/ralph-kit.sh は、古くてもずれとしない（任せられない古い中継はずれとする）
+echo '# 古い版' >> "$APP/scripts/ralph-kit.sh"
+OUT=$("$KIT/install.sh" --check "$APP") || fail "任せられる中継を、ずれと判定した"
+grep -q '更新は要りません' <<<"$OUT" || fail "任せられる中継が古いことを知らせていない"
+perl -pi -e 's/RALPH_KIT_DELEGATED/RALPH_KIT_OLD/g' "$APP/scripts/ralph-kit.sh"
+if "$KIT/install.sh" --check "$APP" >/dev/null; then fail "任せられない古い中継を、ずれと判定しなかった"; fi
+"$KIT/install.sh" "$APP" >/dev/null
+ok "--check は、処理を kit に任せられる古い中継をずれとしない"
+
 git -C "$APP" add -A
 git -C "$APP" commit --quiet -m "kit を入れる"
 git -C "$APP" push --quiet origin HEAD:develop

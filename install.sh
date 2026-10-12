@@ -58,6 +58,11 @@ for f in "${SHIMS[@]}"; do
     continue
   fi
   if $CHECK; then
+    # 処理を kit の中継に任せられる中継（1.2 以降）なら、古くても kit の中継が動くので、ずれとしない
+    if [[ "$f" == scripts/ralph-kit.sh && -x "$TARGET/$f" ]] && grep -q 'RALPH_KIT_DELEGATED' "$TARGET/$f"; then
+      echo "kit と違いますが、処理を kit の中継に任せるので更新は要りません: $f"
+      continue
+    fi
     report "kit と違います: $f"
     continue
   fi
