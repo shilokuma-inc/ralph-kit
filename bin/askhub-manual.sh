@@ -308,6 +308,7 @@ launch_loop() {
     saved_state="$LOOP_STATE.probe"
     mv "$LOOP_STATE" "$saved_state"
     # 確かめられなかったとき・途中で中断されたときは、よけた state を元に戻す
+    # shellcheck disable=SC2064  # trap からは関数の local が見えないので、今の値を printf %q で引用して埋め込む
     trap "mv $(printf '%q' "$saved_state") $(printf '%q' "$LOOP_STATE") 2>/dev/null || true" EXIT
     trap 'exit 130' INT TERM
   fi
