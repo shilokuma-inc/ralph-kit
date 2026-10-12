@@ -127,6 +127,13 @@ git --git-dir="$WORK/kit.git" tag -f v1 "$HEAD_SHA" >/dev/null
 RALPH_KIT_FETCH_INTERVAL=0 "$APP/scripts/ralph-kit.sh" version >/dev/null
 ok "v1 のタグの移動を、取り直す間隔をあけて取り込む"
 
+# 取得の途中で止められて残ったロック（10 分より前のもの）は外して進む
+mkdir "$RALPH_KIT_CACHE/.lock"
+touch -t 202001010000 "$RALPH_KIT_CACHE/.lock"
+[[ "$("$APP/scripts/ralph-kit.sh" version)" == "v1 $HEAD_SHA" ]] || fail "古いロックが残ったままだと取得できない"
+[[ ! -d "$RALPH_KIT_CACHE/.lock" ]] || fail "取得の後にロックが残っている"
+ok "取得の途中で残った古いロックを外し、取得の後はロックを残さない"
+
 [[ "$(RALPH_KIT_REF=next "$APP/scripts/ralph-kit.sh" version)" == "next $NEXT_SHA" ]] || fail "RALPH_KIT_REF でブランチを指定できない"
 [[ "$(RALPH_KIT_DIR="$KIT" "$APP/scripts/ralph-kit.sh" path)" == "$KIT" ]] || fail "RALPH_KIT_DIR を使っていない"
 if RALPH_KIT_REF=--upload-pack=x "$APP/scripts/ralph-kit.sh" version >/dev/null 2>&1; then fail "- で始まる版を受け付けた"; fi

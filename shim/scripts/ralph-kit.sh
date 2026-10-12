@@ -64,7 +64,6 @@ LOCK=""
 lock() {
   local waited=0
   LOCK="$CACHE/.lock"
-  trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
   trap 'exit 130' INT TERM
   until mkdir "$LOCK" 2>/dev/null; do
     # 取得の途中で止められて残ったロックは、10 分たったら外す
@@ -76,6 +75,8 @@ lock() {
     sleep 0.2
     waited=$((waited + 1))
   done
+  # 取れてから外す処理を付ける（待ちきれずに終わるとき、ほかのプロセスのロックを外さないように）
+  trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 }
 unlock() {
   rmdir "$LOCK" 2>/dev/null || true
