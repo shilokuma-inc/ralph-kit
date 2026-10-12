@@ -17,6 +17,9 @@
 #   RALPH_KIT_URL    kit の取得元（既定: https://github.com/shilokuma-inc/ralph-kit.git）
 #   RALPH_KIT_FETCH_INTERVAL  タグ・ブランチを取り直す間隔（秒。既定: 300）
 #   RALPH_KIT_LOCK_TIMEOUT    ほかのプロセスの取得を待つ上限（秒。既定: 120）。過ぎたら取得せずに手元の版を使う
+#
+# 取得した kit に入っている中継（shim/scripts/ralph-kit.sh）がこのファイルと違えば、処理をそちらに任せる。
+# 中継を直したときも、各リポジトリへの PR なしで届けるため（このファイルが使われるのは、最初の取得だけになる）
 set -euo pipefail
 
 # Git hook や wrapper から継承した経路変数が別のチェックアウトを指すことがある
@@ -27,7 +30,8 @@ fail() { echo "ralph-kit: $*" >&2; exit 1; }
 warn() { echo "ralph-kit: $*" >&2; }
 usage() { sed -n '4,6p' "$0" | sed 's/^# //' >&2; exit 64; }
 
-SCRIPTS_DIR=$(cd "$(dirname "$0")" && pwd -P)
+# kit の中継に任せたときは、任せた側（各リポジトリの scripts/）の場所を受け取る
+SCRIPTS_DIR="${RALPH_KIT_SCRIPTS_DIR:-$(cd "$(dirname "$0")" && pwd -P)}"
 CONF="$(dirname "$SCRIPTS_DIR")/.claude/ralph/kit.conf"
 URL="${RALPH_KIT_URL:-https://github.com/shilokuma-inc/ralph-kit.git}"
 CACHE="${RALPH_KIT_CACHE:-$HOME/.cache/ralph-kit}"
@@ -141,30 +145,42 @@ fetch_and_extract() {
   fi
 }
 
+# 取得した kit に入っている中継がこのファイルと違えば、そちらに任せる（任せた先では、もう一度は任せない）
+delegate() {
+  local newer="$KIT/shim/scripts/ralph-kit.sh"
+  [[ -z "${RALPH_KIT_DELEGATED:-}" && -f "$newer" ]] || return 0
+  cmp -s "$newer" "$0" && return 0
+  RALPH_KIT_DELEGATED=1 RALPH_KIT_SCRIPTS_DIR="$SCRIPTS_DIR" exec bash "$newer" "$@"
+}
+
 COMMAND="${1:-}"
-[[ $# -gt 0 ]] && shift
 case "$COMMAND" in
   run)
-    NAME="${1:-}"
-    [[ $# -gt 0 ]] && shift
-    case "$NAME" in
+    case "${2:-}" in
       ralph-setup | ralph-start | ralph-stop | askhub-manual) ;;
       *) usage ;;
     esac
-    locate
+    ;;
+  path | version) ;;
+  *) usage ;;
+esac
+locate
+delegate "$@"
+shift
+case "$COMMAND" in
+  run)
+    NAME="$1"
+    shift
     [[ -x "$KIT/bin/$NAME.sh" ]] || fail "kit（${REF}）に bin/$NAME.sh がありません"
+    # 子のプロセス（ループの claude など）から呼ぶ中継は、ここで渡す kit の場所を使う（任せた印は引き継がない）
+    unset RALPH_KIT_DELEGATED RALPH_KIT_SCRIPTS_DIR
     export RALPH_KIT_DIR="$KIT" RALPH_KIT_REF="$REF" RALPH_KIT_SHA="$SHA"
     exec "$KIT/bin/$NAME.sh" "$@"
     ;;
   path)
-    locate
     echo "$KIT"
     ;;
   version)
-    locate
     echo "$REF $SHA"
-    ;;
-  *)
-    usage
     ;;
 esac

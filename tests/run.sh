@@ -152,6 +152,14 @@ ERR=$("$APP/scripts/ralph-kit.sh" version 2>&1 >/dev/null) || fail "取得の失
 mv "$WORK/kit.git.away" "$WORK/kit.git"
 ok "取得に失敗しても手元の版で動き、間隔の内は取得し直さない"
 
+# 取得した kit の中継がリポジトリのものと違えば、そちらに任せる（リポジトリの中継が古くても、kit の中継で動く）
+perl -pi -e 's/echo "\$REF \$SHA"/echo "OLD \$REF \$SHA"/' "$APP/scripts/ralph-kit.sh"
+[[ "$("$APP/scripts/ralph-kit.sh" version)" == "v1 $HEAD_SHA" ]] || fail "kit の中継に任せていない"
+[[ "$(RALPH_KIT_DELEGATED=1 "$APP/scripts/ralph-kit.sh" version)" == "OLD v1 $HEAD_SHA" ]] || fail "任せた印があるのに、また任せた"
+[[ "$(cd "$WORK" && "$APP/scripts/ralph-kit.sh" path)" == "$KITDIR" ]] || fail "任せた先で、リポジトリの kit.conf を読んでいない"
+"$KIT/install.sh" "$APP" >/dev/null
+ok "取得した kit の中継がリポジトリのものと違えば、そちらに任せる"
+
 [[ "$(RALPH_KIT_REF=next "$APP/scripts/ralph-kit.sh" version)" == "next $NEXT_SHA" ]] || fail "RALPH_KIT_REF でブランチを指定できない"
 [[ "$(RALPH_KIT_DIR="$KIT" "$APP/scripts/ralph-kit.sh" path)" == "$KIT" ]] || fail "RALPH_KIT_DIR を使っていない"
 if RALPH_KIT_REF=--upload-pack=x "$APP/scripts/ralph-kit.sh" version >/dev/null 2>&1; then fail "- で始まる版を受け付けた"; fi
