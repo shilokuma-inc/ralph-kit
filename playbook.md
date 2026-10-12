@@ -251,15 +251,22 @@ CodeRabbit のレート制限は PR の作者（開発者）単位で、同じ�
 スロットを取り直してから印を外し、通常の in-flight に戻す。
 
 ### B-3. マージ
+マージの前に、その PR のブランチを checkout しているスロットを detached にする
+（checkout 中のブランチを `--delete-branch` で消すと、スロットのディレクトリまで消えることがある）。
+マージしたら、**PR が `MERGED` になったことを確かめてから**後続の処理に進む
+（`gh pr merge` が失敗しても後続のコマンドは止まらない。GitHub 上のコンフリクトでマージできていないこともある）:
 ```
+git -C <スロット> checkout --detach
 gh pr merge <番号> --squash --delete-branch
+gh pr view <番号> --json state --jq .state
 ```
-- 成功 → 以下をすべて行う:
+- `MERGED` → 以下をすべて行う:
   1. `gh issue close <Issue番号> --comment 'PR #<PR番号> で対応しました'`
      （統合ブランチへのマージでは `resolve #N` の自動クローズが**効かない**ため必須）
   2. ゴールファイルの該当タスクを `[x]` にする{{GOAL_FILE_COMMIT_NOTE}}
   3. state からスロットを解放
-- コンフリクトで失敗 → 該当スロットで
+- `MERGED` でない（コンフリクトなど）→ 該当スロットで PR のブランチに戻してから
+  `git -C <スロット> checkout -B <PRのブランチ> origin/<PRのブランチ>`、
   `git fetch origin && git rebase origin/{{INTEGRATION_BRANCH}}` し、衝突を解消してコミット、
   `git push --force-with-lease`。in-flight のまま（次イテレーションで再挑戦）
 
