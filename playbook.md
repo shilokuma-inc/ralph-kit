@@ -253,11 +253,12 @@ CodeRabbit のレート制限は PR の作者（開発者）単位で、同じ�
 ### B-3. マージ
 マージの前に、その PR のブランチを checkout しているスロットを detached にする
 （checkout 中のブランチを `--delete-branch` で消すと、スロットのディレクトリまで消えることがある）。
+子 PR は squash せず merge commit でマージする（コミットの粒度を epic に残すため。最終 PR も merge commit で取り込む）。
 マージしたら、**PR が `MERGED` になったことを確かめてから**後続の処理に進む
 （`gh pr merge` が失敗しても後続のコマンドは止まらない。GitHub 上のコンフリクトでマージできていないこともある）:
 ```
 git -C <スロット> checkout --detach
-gh pr merge <番号> --squash --delete-branch
+gh pr merge <番号> --merge --delete-branch
 gh pr view <番号> --json state --jq .state
 ```
 - `MERGED` → 以下をすべて行う:
