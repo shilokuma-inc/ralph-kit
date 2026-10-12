@@ -170,6 +170,7 @@ promise は完全一致でしか成立せず「詰まった」を表現できな
 - ask のコメントは質問の目印（`<!-- ask-hub:question id="…" options="…" -->`）で始め、PR に `needs-answer` を付ける。
   目印が無い ask は AskHub に届かず、回答してもループが再開しない
 - 判断ログ Issue には `decision-log`、実機確認 Issue には `needs-verify` を付ける（AskHub の「任意判断」「実機確認」に出る）
+- 実機確認 Issue の本文の**先頭**に `ask-hub:verify` の目印を置く（AskHub が元の PR 番号を一覧に出す。「実機確認の扱い」の例を参照）
 - 最終 PR はループで作らない。通常の自動ループではオーケストレーターが「最終 PR に載せる内容」を読んで作り、
   手動ループ（manual-loop）では担当者が `scripts/askhub-manual.sh final` で作る
 - 不足しているプロトコルのラベルは `ralph-setup.sh` が作る
@@ -224,6 +225,8 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    goal に未完了のタスク（`※回答待ち` のものを除く）が残っていれば作らない。回答待ちの PR だけが残っているときは作り（自動ループと同じ）、その時点で open な回答待ちの PR を本文の「回答待ちの PR」に載せる。
    `※回答待ち` のタスクは、goal に書いた PR（`※回答待ち（PR #123 / ask id 456）`）が open な回答待ちの PR（`needs-answer`）でなければ作らない。
    マージは AskHub の「要対応」タブの「マージ待ち」から（マージするとゴール元の Discussion が閉じる）。
+   `final` を流し忘れても、loop-status が「完了」になってから 30 分たつと、オーケストレーターが GitHub 上の子 PR・仮決め一覧・実機確認から最終 PR を作る
+   （手元の state の「最終 PR に載せる内容」は使えないので、内容は `final` で作るものより簡素になる）。
    `ASKHUB_BASE_BRANCH` を `develop` 以外にしたときは、Discussion を閉じるワークフロー（`close-goal-discussion.yml`）が動かないので、
    マージした後に担当者がゴール元の Discussion を閉じる（閉じるまで、このリポジトリの自動ループは止まったまま）
 

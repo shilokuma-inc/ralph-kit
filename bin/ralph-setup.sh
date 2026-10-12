@@ -41,11 +41,26 @@ git rev-parse --verify --quiet "origin/$BASE" >/dev/null \
 # AskHub のプロトコルのラベル（shilokuma-inc/ask-hub-apple の docs/protocol.md）。
 # ループが ask・判断ログ・実機確認に付け、AskHub とオーケストレーターがこれで集める。無ければ作る
 if command -v gh >/dev/null 2>&1; then
+  # 一覧の取得は一時的なエラー（API のレート制限・ネットワーク）で失敗することがあるので、数回やり直す
+  label_exists() {
+    local attempt names
+    for attempt in 1 2 3; do
+      if names=$(gh label list --limit 1000 --json name --jq '.[].name' 2>/dev/null); then
+        grep -Fqx -- "$1" <<<"$names"
+        return
+      fi
+      sleep $((attempt * 5))
+    done
+    return 1
+  }
   while IFS='|' read -r name color description; do
-    # 既にあるラベルの作成は失敗するので、失敗したら一覧で有無を確かめる（set -e で止めないよう if で受ける）
+    # 既にあるラベルの作成は失敗するので、失敗したら有無を確かめる（set -e で止めないよう if で受ける）。
+    # 「already exists」で失敗したなら、それ自体があることの確認になる（一覧を取り直さない）
     if error=$(gh label create "$name" --color "$color" --description "$description" 2>&1); then
       echo "ラベルを作成しました: $name"
-    elif ! gh label list --limit 1000 --json name --jq '.[].name' | grep -Fqx -- "$name"; then
+    elif [[ "$error" == *"already exists"* ]]; then
+      :
+    elif ! label_exists "$name"; then
       echo "エラー: ラベルを作成も確認もできませんでした: $name" >&2
       printf '%s\n' "$error" >&2
       exit 1

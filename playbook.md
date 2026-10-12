@@ -367,11 +367,17 @@ Simulator・ローカルビルドでは確かめられず、実機や実デー�
 （例: 実際の Webhook に送った表示、課金の Sandbox、プッシュ通知、広告の実配信）は、
 **PR を止めずに Issue へ切り出す。**
 
-1. Issue を起票する:
+1. Issue を起票する。**本文の先頭**に `ask-hub:verify` の目印を置く（AskHub アプリが元の PR 番号・epic を読むため）:
    ```
-   gh issue create --title '【CHORE】実機確認: <確認すること>' --assignee @me --label needs-verify --body '…'
+   gh issue create --title '【CHORE】実機確認: <確認すること>' --assignee @me --label needs-verify --body "$(cat <<'BODY'
+   <!-- ask-hub:verify {"epic":"<統合ブランチ>","pullRequest":<元のPR番号>} -->
+   元の PR: #<元のPR番号>
+
+   <確認手順・期待する結果>
+   BODY
+   )"
    ```
-   本文には、元の PR 番号・確認手順・期待する結果を書く
+   元の PR 番号が無い場合は `pullRequest` キーと「元の PR」行を省く。epic が無い場合は `epic` キーを省く
 2. PR の該当行に `memo-badge` で起票した旨だけを書く:
    ```
    ![memo-badge](https://img.shields.io/badge/review-memo-lightgrey)
