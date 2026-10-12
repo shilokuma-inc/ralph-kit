@@ -268,8 +268,9 @@ gh pr view <番号> --json state --jq .state
   3. state からスロットを解放
 - `MERGED` でない（コンフリクトなど）→ 該当スロットで PR のブランチに戻してから
   `git -C <スロット> checkout -B <PRのブランチ> origin/<PRのブランチ>`、
-  `git fetch origin && git rebase origin/{{INTEGRATION_BRANCH}}` し、衝突を解消してコミット、
-  `git push --force-with-lease`。in-flight のまま（次イテレーションで再挑戦）
+  `git -C <スロット> fetch origin && git -C <スロット> rebase origin/{{INTEGRATION_BRANCH}}` し、衝突を解消してコミット、
+  `git -C <スロット> push --force-with-lease`。in-flight のまま（次イテレーションで再挑戦）。
+  作業ディレクトリ（制御用 worktree）で `git rebase` や `git push` を実行すると、統合ブランチを書き換えてしまう
 
 ## STEP C: 新規タスクの着手（空きスロットがある場合のみ）
 **B-1 で回答が付いたのにスロットが空かず回答待ちに残した PR がある場合は、新規タスクに
