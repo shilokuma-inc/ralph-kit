@@ -1,24 +1,39 @@
-# ralph-loop 運用テンプレート
+# ralph-kit
 
 [ralph-loop](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/ralph-loop) で
-自律的に実装を回すための雛形。設計の根拠と、実際に踏んだ落とし穴は
-[Discussion #87](https://github.com/shilokuma-inc/template-app-ios/discussions/87) を参照。
+自律的に実装を回すための一式（playbook・スクリプト・ワークフロー）の正本。shilokuma-inc の各アプリのリポジトリは、
+このリポジトリをコピーせずに、中継スクリプトで呼んで使う。設計の根拠と、実際に踏んだ落とし穴は
+[template-app-ios の Discussion #87](https://github.com/shilokuma-inc/template-app-ios/discussions/87) を参照。
 
 ## 構成
 
 ```
-.claude/ralph/
-  playbook.template.md          手順。毎イテレーション読み直される
-  goal.template.md              タスクと確定済みの決定事項
-  state.template.md             in-flight / 回答待ち / 保留 の記録
-  settings.deny.example.json    権限の deny リスト（制御用 worktree の settings.json へ）
-  CLAUDE.snippet.md             CLAUDE.md に貼るポインタ（新しいセッションの入口）
-scripts/
+playbook.md                     手順の雛形。制御用 worktree にコピーされ、毎イテレーション読み直される
+templates/
+  goal.md                       タスクと確定済みの決定事項
+  state.md                      in-flight / 回答待ち / 保留 の記録
+  settings.deny.json            権限の deny リスト（制御用 worktree の settings.json へ）
+  CLAUDE.snippet.md             各リポジトリの CLAUDE.md に貼るポインタ（新しいセッションの入口）
+bin/
   ralph-setup.sh                worktree と統合ブランチを用意する
   ralph-start.sh                state ファイルを生成する（＝ループ開始）
   ralph-stop.sh                 停止と後片付け
   askhub-manual.sh              手動ループ（担当者の Mac で回す）の準備・起動・状態の書き出し・最終 PR
+shim/                           各リポジトリに置くファイルの原本（install.sh が配る）
+install.sh                      リポジトリに中継を入れる・ずれを確かめる
+.github/workflows/
+  close-goal-discussion.yml     最終 PR のマージでゴール元の Discussion を閉じる（各リポジトリから uses で呼ぶ）
 ```
+
+各アプリのリポジトリに置くのは、kit を呼ぶ中継と、使う版だけ:
+
+| リポジトリのファイル | 役割 |
+| --- | --- |
+| `scripts/ralph-setup.sh`・`ralph-start.sh`・`ralph-stop.sh`・`askhub-manual.sh` | kit の同名のスクリプトを呼ぶ中継。使い方は kit と同じ |
+| `scripts/ralph-kit.sh` | kit を取得して実行する。`path`・`version` で場所と版を表示する |
+| `.claude/ralph/kit.conf` | 使う kit の版（`ref=v1`） |
+| `.claude/ralph/README.md` | この README への案内 |
+| `.github/workflows/close-goal-discussion.yml` | kit のワークフローの呼び出し |
 
 ループが実際に読むのは、制御用 worktree に置かれた次の3ファイル。
 
@@ -30,10 +45,40 @@ scripts/
 
 いずれも `.git/info/exclude` で除外される（`ralph-setup.sh` が追記する）。
 
+## 版と更新
+
+各リポジトリの中継は、`.claude/ralph/kit.conf` の `ref`（既定は `v1`）が指す kit を `~/.cache/ralph-kit/<コミット>/` に取得して実行する。
+
+- **互換を保つ修正は、kit に PR を 1 本出すだけで全リポジトリに届く。** `VERSION` を上げた PR が main に入ると、
+  ワークフロー（`release.yml`）が `vX.Y.Z` のタグを打ち、`v1` をそのコミットに動かす。各リポジトリへの PR は要らない
+- タグ・ブランチは 5 分おきに取り直す（`RALPH_KIT_FETCH_INTERVAL`）。取得できないときは手元にある版で動く
+- **ループは起動したときの版の kit を使い続ける。** `askhub-manual.sh launch` / `resume` は、起動する claude に
+  `RALPH_KIT_DIR`（取得した kit の場所）を渡すので、周回中に呼ぶ `scripts/askhub-manual.sh status` も同じ版を使う。新しい版は次の起動から効く
+- 互換を崩す変更（中継・`kit.conf`・ワークフローの呼び出しの形を変えるもの）は `v2` にし、各リポジトリの `kit.conf` を書き換える
+- 制御用 worktree の playbook は、epic を始めたとき（初回の `ralph-setup.sh`）にだけコピーされる。
+  `ralph-setup.sh` を再実行すると、**既存の playbook に無い kit の節を見出し単位で報告する**ので、必要なものを手で取り込む
+
+### 各リポジトリに入れる・ずれを確かめる
+
+```bash
+git clone https://github.com/shilokuma-inc/ralph-kit.git
+ralph-kit/install.sh ~/path/to/myapp-ios          # 中継を置き、kit に移った雛形を消す（コミットはしない）
+ralph-kit/install.sh --check ~/path/to/myapp-ios  # ずれがあれば表示して終了コード 1
+```
+
+`CLAUDE.md` の「## ralph-loop による自律開発」の節は、`<!-- ralph-kit:snippet begin -->` と `end` の間だけを kit の内容にそろえる。
+このリポジトリだけの注意（検証コマンドの癖など）は end の後に書く。
+
+### kit を直すとき
+
+1. **アプリのリポジトリで中継や雛形を直さない。** 直すのは kit だけ（直してもアプリのリポジトリには届かない・次の install で消える）
+2. 手元の kit で試すときは、アプリのリポジトリで `RALPH_KIT_DIR=<kit の checkout> scripts/ralph-setup.sh …` のように、kit の場所を指定する
+3. macOS の `/bin/bash`（3.2）で `tests/run.sh` を流してから PR を出す。互換を保つ修正なら `VERSION` のパッチかマイナーを上げ、`CHANGELOG.md` に書く
+
 ## まず CLAUDE.md にポインタを置く
 
 新しい Claude Code セッションはこの仕組みの存在を知らない。**`CLAUDE.md` は毎セッション
-自動で読み込まれる唯一の入口**なので、`CLAUDE.snippet.md` の内容を `CLAUDE.md` に
+自動で読み込まれる唯一の入口**なので、`templates/CLAUDE.snippet.md` の内容を各リポジトリの `CLAUDE.md` に
 追記しておく。これが無いと、文脈を持たないセッションは state ファイルを手書きしたり、
 統合ブランチを挟まずに develop へ直接マージしたりする。
 
@@ -62,14 +107,6 @@ cd ../myapp-ralph-ctl && git push -u origin epic/monetization
 停止は `scripts/ralph-stop.sh`。worktree ごと消すなら、**Claude のセッションが終了してから**
 `scripts/ralph-stop.sh --worktrees` を実行する（実行中のループを止めたのと同じ呼び出しでは、
 作業中のスロットを壊さないよう削除しない）。
-
-### テンプレートを更新したとき
-
-**テンプレートは初回のみコピーされる。** 置換済みの playbook を上書きしないためで、
-改善しても既存の制御用 worktree には自動では届かない。
-
-`ralph-setup.sh` を再実行すると、**既存の playbook に無いテンプレートの節を見出し単位で
-報告する**ので、必要なものを手で取り込む。ゴールと state は影響を受けない。
 
 ## 設計上の要点
 
@@ -165,7 +202,7 @@ promise は完全一致でしか成立せず「詰まった」を表現できな
 | 全タスク完了 | オーケストレーターが epic → develop の最終 PR（`epic-final`）を作る |
 | 最終 PR を develop にマージ | ワークフロー（`close-goal-discussion.yml`）が、ゴール元の Discussion を解決済みで閉じる |
 
-**このテンプレートの側で守ること**（形式の正本は ask-hub-apple の `docs/protocol.md`）:
+**ループの側で守ること**（形式の正本は ask-hub-apple の `docs/protocol.md`）:
 
 - ask のコメントは質問の目印（`<!-- ask-hub:question id="…" options="…" -->`）で始め、PR に `needs-answer` を付ける。
   目印が無い ask は AskHub に届かず、回答してもループが再開しない

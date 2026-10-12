@@ -42,7 +42,7 @@ if [[ "$TASKS" -eq 0 && "$RESUME_REASON" != "decision-log" ]]; then
   echo "$GOAL に未完了タスクがありません" >&2
   exit 1
 fi
-# goal.template.md の雛形のまま（{{日本語タイトル}} などが残る）でも未完了タスクの数は数えられてしまう。
+# goal の雛形（kit の templates/goal.md）のまま（{{日本語タイトル}} などが残る）でも未完了タスクの数は数えられてしまう。
 # 起動すると STEP A を飛ばして雛形のタスクに着手するので、プレースホルダが残っていれば止める
 GOAL_LEFTOVER=$(grep -o '{{[^}]*}}' "$GOAL" | sort -u || true)
 if [[ -n "$GOAL_LEFTOVER" ]]; then
