@@ -9,6 +9,7 @@
   ループが完了語の promise を出して終わったら、見張り役がメインの checkout で `final` を流し、最終 PR を作る（自動ループと同じく、担当者の指示は要らない）
 - promise を出さずに終わったとき（state ファイルが残る異常終了・`ralph-stop.sh` での停止・無進捗での停止）は作らない。結果はループのログに書く
 - `ASKHUB_AUTO_FINAL=0` を付けて起動すると、これまでどおり見張り役を起動しない（担当者が `final` を流す）
+- `askhub-manual.sh` の状態の書き出しが、GNU の `stat`・`date`（Linux や、PATH の先に coreutils がある Mac）でも動くようにした（`unbound variable` で落ちていた）
 
 ## 1.2.2（2026-10-12）
 
