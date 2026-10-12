@@ -55,8 +55,11 @@ install.sh                      リポジトリに中継を入れる・ずれを
 - **ループは起動したときの版の kit を使い続ける。** `askhub-manual.sh launch` / `resume` は、起動する claude に
   `RALPH_KIT_DIR`（取得した kit の場所）を渡すので、周回中に呼ぶ `scripts/askhub-manual.sh status` も同じ版を使う。新しい版は次の起動から効く
 - 互換を崩す変更（中継・`kit.conf`・ワークフローの呼び出しの形を変えるもの）は `v2` にし、各リポジトリの `kit.conf` を書き換える
-- 制御用 worktree の playbook は、epic を始めたとき（初回の `ralph-setup.sh`）にだけコピーされる。
-  `ralph-setup.sh` を再実行すると、**既存の playbook に無い kit の節を見出し単位で報告する**ので、必要なものを手で取り込む
+- **制御用 worktree の playbook は、起動のたび（`ralph-start.sh`。launch・resume・オーケストレーターの起動）に kit の更新を取り込む。**
+  epic を始めたときにコピーした kit の playbook（`.claude/ralph-playbook.base.local.md`）を共通の祖先にして 3-way merge するので、
+  埋めた値・「このアプリ固有の前提」・この epic で書き足した手順は残る。kit の変更が playbook の書き換えた行と重なったとき、
+  新しいプレースホルダが入るときは取り込まずに、今の playbook のまま起動する（手で取り込んだら、祖先を kit の playbook で置き換える）
+- 祖先の記録が無い playbook（1.1 より前に始めた epic）は書き換えない。`ralph-setup.sh` を再実行すると、**既存の playbook に無い kit の節を見出し単位で報告する**ので、必要なものを手で取り込む
 
 ### 各リポジトリに入れる・ずれを確かめる
 
