@@ -3,6 +3,12 @@
 各アプリのリポジトリは `.claude/ralph/kit.conf` の `ref=v1` で、v1 の最新を使う（`VERSION` を上げた PR が main に入ると、`release.yml` が `v1` を動かす）。
 互換を崩す変更（各リポジトリの中継・`kit.conf`・ワークフローの呼び出しの形を変える必要があるもの）は v2 にする。
 
+## 1.1.0（2026-10-12）
+
+- 起動のたび（`ralph-start.sh`）に、kit の playbook の更新を制御用 worktree の playbook へ 3-way merge で取り込む。
+  祖先は `ralph-setup.sh` が初回にコピーした `.claude/ralph-playbook.base.local.md`。衝突・新しいプレースホルダのときは取り込まない
+- 1.1 より前に始めた epic（祖先の記録が無い playbook）は、これまでどおり書き換えない
+
 ## 1.0.0（2026-10-12）
 
 各リポジトリにコピーしていたループ一式の正本を、このリポジトリに移した。
