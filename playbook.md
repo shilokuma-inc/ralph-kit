@@ -442,7 +442,7 @@ state ファイルに停止理由を明記したうえで `rm .claude/ralph-loop
   ループの状態を書き出す（10 分に 1 回までしか書かないので、毎周回呼んでよい）。promise を出す直前には `scripts/askhub-manual.sh status --stopping` を実行する。
   STEP D のほかに、PR の作成・マージ・回答待ちへの移動・ゴールのチェックの直後にも `scripts/askhub-manual.sh status` を実行する
   （1 周が 1 時間を超えることがあり、STEP D まで書かないと AskHub の進捗が止まって見える。同じ状態なら書かないので、何度呼んでもよい）。
-  最終 PR はループでは作らない（ループが終わった後、担当者の Claude Code が制御用 worktree の外で `scripts/askhub-manual.sh final` を実行する）
+  最終 PR はループでは作らない（ループが promise を出して終わると、`launch` / `resume` が起動した見張り役が制御用 worktree の外で `scripts/askhub-manual.sh final` を実行する）
 - **全タスクが `[x]`（完了または保留）か `※回答待ち` 付き、作業中の in-flight がゼロ、
   かつ state の「回答待ち」表に `回答あり・スロット待ち` の行が無い**
   → `<promise>{{PROMISE}}</promise>` を出力。
