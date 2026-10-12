@@ -134,6 +134,24 @@ touch -t 202001010000 "$RALPH_KIT_CACHE/.lock"
 [[ ! -d "$RALPH_KIT_CACHE/.lock" ]] || fail "取得の後にロックが残っている"
 ok "取得の途中で残った古いロックを外し、取得の後はロックを残さない"
 
+# ほかのプロセスがロックを持ったまま終わらないときは、待ちきれたら取得せずに手元の版を使う（そのロックは外さない）
+mkdir "$RALPH_KIT_CACHE/.lock"
+OUT=$(RALPH_KIT_LOCK_TIMEOUT=1 RALPH_KIT_FETCH_INTERVAL=0 "$APP/scripts/ralph-kit.sh" version 2>"$WORK/lock.err") || fail "ロックが空かないと失敗した"
+[[ "$OUT" == "v1 $HEAD_SHA" ]] || fail "ロックが空かないときに手元の版を使っていない: $OUT"
+grep -q '順番待ち' "$WORK/lock.err" || fail "順番待ちで手元の版を使ったことを知らせていない"
+[[ -d "$RALPH_KIT_CACHE/.lock" ]] || fail "ほかのプロセスのロックを外した"
+rmdir "$RALPH_KIT_CACHE/.lock"
+ok "ロックが空かないときは、取得せずに手元の版を使う"
+
+# 取得に失敗しても時刻を残し、間隔の内は取得し直さない（オフラインのとき、周回ごとに待たせない）
+mv "$WORK/kit.git" "$WORK/kit.git.away"
+ERR=$(RALPH_KIT_FETCH_INTERVAL=0 "$APP/scripts/ralph-kit.sh" version 2>&1 >/dev/null) || fail "取得できないと失敗した"
+grep -q '取得できませんでした' <<<"$ERR" || fail "取得の失敗を知らせていない"
+ERR=$("$APP/scripts/ralph-kit.sh" version 2>&1 >/dev/null) || fail "取得の失敗の後に失敗した"
+[[ -z "$ERR" ]] || fail "取得に失敗した直後に、また取得を試した: $ERR"
+mv "$WORK/kit.git.away" "$WORK/kit.git"
+ok "取得に失敗しても手元の版で動き、間隔の内は取得し直さない"
+
 [[ "$(RALPH_KIT_REF=next "$APP/scripts/ralph-kit.sh" version)" == "next $NEXT_SHA" ]] || fail "RALPH_KIT_REF でブランチを指定できない"
 [[ "$(RALPH_KIT_DIR="$KIT" "$APP/scripts/ralph-kit.sh" path)" == "$KIT" ]] || fail "RALPH_KIT_DIR を使っていない"
 if RALPH_KIT_REF=--upload-pack=x "$APP/scripts/ralph-kit.sh" version >/dev/null 2>&1; then fail "- で始まる版を受け付けた"; fi
