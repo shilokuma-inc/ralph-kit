@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit の設定: https://docs.coderabbit.ai/reference/configuration
+language: ja-JP
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false
+  path_instructions:
+    - path: "**/*.sh"
+      instructions: |
+        macOS の /bin/bash（3.2）で動くこと（連想配列・mapfile・${var,,} を使わない、set -u の下で空の配列を展開しない、
+        変数の直後に全角文字を続けない）を確認してください。これらのスクリプトは全アプリのリポジトリのループから使われます。
+    - path: "playbook.md"
+      instructions: |
+        ループ（Claude）が毎イテレーション読む手順書です。手順どうしの矛盾、終了条件を満たせなくなる変更、
+        AskHub のオーケストレーターが読む目印・書式（ask-hub:*・※回答待ち・※保留）の変更がないかを確認してください。
+  tools:
+    shellcheck:
+      enabled: true
+
+chat:
+  auto_reply: true

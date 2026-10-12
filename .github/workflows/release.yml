@@ -1,0 +1,43 @@
+# VERSION を上げた変更が main に入ったら、vX.Y.Z のタグを打ち、vX（各リポジトリの kit.conf が指す版）をそのコミットに動かす。
+# 各リポジトリは ref=v1 で使うので、v1 を動かした時点で、次に中継を呼んだループ（の起動）から新しい版になる。
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Tag the version and move the major tag
+        run: |
+          set -euo pipefail
+          version=$(tr -d '[:space:]' < VERSION)
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION の形式が不正です（X.Y.Z）: ${version}" >&2
+            exit 1
+          fi
+          tag="v${version}"
+          major="v${version%%.*}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "${tag} は既にあります。何もしません"
+            exit 0
+          fi
+          git tag "$tag" "$GITHUB_SHA"
+          git tag -f "$major" "$GITHUB_SHA"
+          git push origin "refs/tags/${tag}"
+          git push --force origin "refs/tags/${major}"
+          echo "${tag} を打ち、${major} を ${GITHUB_SHA} に動かしました" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,22 @@
+# ralph-kit
+
+shilokuma-inc の各アプリのリポジトリで使う ralph-loop 一式の正本。仕組みは `README.md` を読む。
+**ここを直すと、v1 のタグが動いた時点で全リポジトリのループに届く。** 壊れた版を出すと全リポジトリのループが同時に止まるので、次を守る。
+
+## 変更するとき
+
+- 各リポジトリの中継（`shim/`）・`kit.conf`・ワークフローの呼び出しの形は、なるべく変えない。変えると全リポジトリへの PR が要る（v2 になる）
+- スクリプトは macOS の `/bin/bash`（3.2）で動かす。連想配列・`mapfile`・`${var,,}` は使わない。`set -u` の下で空の配列を `"${a[@]}"` で展開しない
+- 変数の直後に全角文字を続けない。`${VAR}（` のように波かっこで閉じる（bash 3.2 で unbound variable になる）
+- スクリプトの出力・コメント・ドキュメントは日本語で書く（各リポジトリの規約と同じ）
+- PR を出す前に、macOS の `/bin/bash tests/run.sh` を流す（CI の Linux は bash 5 なので、3.2 でしか起きない不具合を拾えない）。
+  テストは HEAD のコミットを取得して流すので、コミットしてから流す
+- 振る舞いを変えたら `CHANGELOG.md` に書き、`VERSION` を上げる（互換を保つならマイナーかパッチ）。`VERSION` を上げた PR のマージで
+  `release.yml` がタグを打つ。上げない PR はタグを動かさない（docs だけの変更など）
+- playbook の手順を変えたら、オーケストレーター（shilokuma-inc/ask-hub-apple の `scripts/orchestrator/` と `AskHubKit`）が
+  同じ目印・ラベル・ファイル名を読んでいないか確かめる（`ask-hub:*` の目印、`※回答待ち`・`※保留` の書式、`.claude/*.local.*` のファイル名）
+
+## Git
+
+- コミットは `[type] 日本語のメッセージ`、PR タイトルは `【TYPE】タイトル`。PR は squash せず merge commit でマージする
+- main に直接 push しない（タグは `release.yml` が打つ）
