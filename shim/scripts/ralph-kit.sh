@@ -14,7 +14,8 @@
 #                    kit を直して試すときは、kit の checkout を指定する
 #   RALPH_KIT_REF    kit.conf の ref の代わりに使う版（タグ・ブランチ・コミット）
 #   RALPH_KIT_CACHE  取得した kit の置き場所（既定: ~/.cache/ralph-kit）
-#   RALPH_KIT_URL    kit の取得元（既定: https://github.com/shilokuma-inc/ralph-kit.git）
+#   RALPH_KIT_URL    kit の取得元（既定: https://github.com/shilokuma-inc/ralph-kit.git）。置き場所に初めて取得するときだけ使う
+#                    （取得元を変えるときは、RALPH_KIT_CACHE も別の場所にする。既にある置き場所は、最初の取得元から取り直す）
 #   RALPH_KIT_FETCH_INTERVAL  タグ・ブランチを取り直す間隔（秒。既定: 300）
 #   RALPH_KIT_LOCK_TIMEOUT    ほかのプロセスの取得を待つ上限（秒。既定: 120）。過ぎたら取得せずに手元の版を使う
 #
@@ -63,6 +64,8 @@ locate() {
   [[ "$REF" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ ]] || fail "kit の版の指定が不正です: $REF"
   command -v git >/dev/null 2>&1 || fail "git が見つかりません"
   mkdir -p "$CACHE" || fail "kit の置き場所を作れません: $CACHE"
+  # 相対パスで指定されても、ほかの場所へ cd した後（launch の起動など）に kit を見つけられるよう、絶対パスにする
+  CACHE=$(cd "$CACHE" && pwd -P)
   if lock; then
     fetch_and_extract
     unlock
