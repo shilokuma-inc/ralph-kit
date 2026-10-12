@@ -12,10 +12,12 @@
 #   2. （Claude が playbook の {{...}} を埋め、STEP A に沿って goal を作る）
 #   3. launch: 完了語を記録し、ralph-start.sh で state を作り、制御用 worktree で claude -p のループをバックグラウンドで起動する
 #              （bypassPermissions で起動する。MDM などで禁止された Mac では auto モード。どちらも使えなければ起動しない）
+#              あわせて見張り役（watch-final）を裏で起動し、ループが完了語を出して終わったら final を流す（ASKHUB_AUTO_FINAL=0 で止める）
 #   4. status: 状態用の Issue を書き手 manual・回している人つきで書き直す（playbook の STEP D から呼ぶ。10 分に 1 回まで）
-#   5. resume: 回答が付いた後などに、記録した完了語でループを起動し直す
+#   5. resume: 回答が付いた後などに、記録した完了語でループを起動し直す（launch と同じく見張り役も起動する）
 #   6. final:  ループが終わったら、ゴール元の目印つきの最終 PR（epic-final）を作る。制御用 worktree の外から呼ぶ
 #              goal に未完了のタスクが残っていれば作らない（回答待ちの PR だけが残っているときは作る）
+#              ふだんは見張り役が呼ぶ。手で呼ぶのは、見張り役が動かなかったとき（Mac の再起動など）や ASKHUB_AUTO_FINAL=0 のとき
 #
 # 必要なもの: gh（このリポジトリに書き込み権限のあるアカウントでログイン済み）・git・claude（ralph-loop プラグイン入り）
 set -euo pipefail
@@ -118,8 +120,10 @@ refresh_trusted_authors() {
 # ---- 状態用の Issue（loop-status）--------------------------------------------------------
 
 iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-iso_of() { date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ; }
-mtime() { stat -f %m "$1" 2>/dev/null || echo 0; }
+# GNU の書き方を先に試し、macOS（BSD）に戻す。GNU の stat は BSD の -f を「ファイルシステムの情報」と読んで成功するので、
+# BSD を先にすると Linux や、PATH の先に coreutils がある Mac で数字でない値になる（macOS の date・stat は GNU の -d・-c を拒む）
+iso_of() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ; }
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 
 count_lines() { grep -c -E "$1" "$2" 2>/dev/null || true; }
 
@@ -337,8 +341,31 @@ launch_loop() {
   state_set permission_mode "$permission_mode"
   echo "ループを起動しました（PID $(cat "$PID_FILE")、権限モード: ${permission_mode}、ログ: ${log}）"
   echo "進み具合を見るには: tail -f \"$log\""
+  start_final_watch "$(tr -d '[:space:]' < "$PID_FILE")" "$log"
   write_status false true
 }
+
+# ループが終わったら最終 PR を作る見張り役を、裏で起動する（自動ループでオーケストレーターが作るのと同じく、担当者に final を頼ませない）。
+# 見張り役はメインの checkout で動くシェルで、ループの Claude ではないので、ループの deny（gh pr create --base develop）には当たらない。
+# ASKHUB_AUTO_FINAL=0 なら起動しない（担当者が final を流す）
+start_final_watch() {
+  local pid="$1" log="$2" watch_pid
+  if [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
+    echo "ASKHUB_AUTO_FINAL=0 のため、最終 PR は自動では作りません（ループが終わったら scripts/askhub-manual.sh final）"
+    return 0
+  fi
+  watch_pid=$(
+    cd "$MAIN"
+    RALPH_KIT_DIR="$KIT_DIR" nohup "$KIT_DIR/bin/askhub-manual.sh" watch-final "$pid" "$log" </dev/null >>"$log" 2>&1 &
+    echo $!
+  )
+  # 見張り役が動いているかを外から確かめられるように残す（見張り役は final の後も状態の書き出しで記録ファイルを書く）
+  state_set watch_pid "$watch_pid"
+  echo "ループが完了語を出して終わったら、最終 PR を自動で作ります（作れなかったときは scripts/askhub-manual.sh final）"
+}
+
+# 見張り役がループのログに書く 1 行
+watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 # ---- サブコマンド --------------------------------------------------------------------------
 
@@ -437,6 +464,34 @@ NEXT
     (cd "$MAIN" && "$KIT_DIR/bin/ralph-setup.sh" "$EPIC" "$BASE_BRANCH" >/dev/null)
     refresh_trusted_authors "$(trusted_authors)"
     launch_loop "$PROMISE"
+    ;;
+
+  watch-final)
+    # launch / resume が裏で起動する見張り役（担当者は呼ばない）。ループのプロセスが終わるのを待ち、
+    # ループが完了語の promise を出して終わったときだけ final を流す（自動ループと同じく、異常終了したものには作らない）
+    WATCHED="${1:-}"
+    WATCHED_LOG="${2:-}"
+    [[ "$WATCHED" =~ ^[0-9]+$ && -n "$WATCHED_LOG" ]] || usage
+    while kill -0 "$WATCHED" 2>/dev/null; do
+      sleep "${ASKHUB_FINAL_WATCH_INTERVAL:-30}"
+    done
+    # 見張っている間に resume などで別のループが起動していたら、そのループの見張り役に任せる
+    if [[ "$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || true)" != "$WATCHED" ]]; then
+      watch_note "別のループが起動しているため、最終 PR はそのループが終わってから作ります"
+      exit 0
+    fi
+    # Stop hook は promise を受けると state ファイルを消す。残っていれば promise を出さずに終わった（API のエラーなどの異常終了）。
+    # ralph-stop.sh で止めたとき・無進捗で止まったときも state ファイルは消えるので、claude -p の最後の出力（ログ）の promise でも確かめる
+    PROMISE=$(state_get promise)
+    if [[ -f "$LOOP_STATE" || -z "$PROMISE" ]] || ! grep -Fq "<promise>$PROMISE</promise>" "$WATCHED_LOG" 2>/dev/null; then
+      watch_note "ループが完了語を出さずに終わったため、最終 PR は作りません（続けるなら scripts/askhub-manual.sh resume）"
+      exit 0
+    fi
+    watch_note "ループが完了語を出して終わったので、最終 PR を作ります"
+    if ! (cd "$MAIN" && "$KIT_DIR/bin/askhub-manual.sh" final); then
+      watch_note "最終 PR を作れませんでした（上のエラーを確かめて、scripts/askhub-manual.sh final を手で流してください）"
+      exit 1
+    fi
     ;;
 
   final)

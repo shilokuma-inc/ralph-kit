@@ -19,13 +19,36 @@ ok() { echo "ok: $*"; PASSED=$((PASSED + 1)); }
 mkdir -p "$WORK/bin" "$WORK/home/.claude"
 cat > "$WORK/bin/gh" <<'GH'
 #!/bin/bash
-# テスト用の gh。リポジトリの特定とラベルの作成だけ成功を返す
+# テスト用の gh。リポジトリの特定・書き込み権限を持つ人・PR の作成だけ値を返し、ほかは成功だけを返す。
+# GH_LOG があれば、呼ばれた引数をそこに書き足す
+[[ -z "${GH_LOG:-}" ]] || printf '%s\n' "$*" >> "$GH_LOG"
 case "$*" in
   "repo view"*) echo "example/myapp-ios" ;;
+  "api repos/example/myapp-ios/collaborators"*) echo "test" ;;
+  "pr create"*) echo "https://github.com/example/myapp-ios/pull/99" ;;
   *) exit 0 ;;
 esac
 GH
-chmod +x "$WORK/bin/gh"
+# テスト用の claude。権限モードの確認（stream-json）には init の行を返す。
+# ループとしては、STUB_LOOP=promise なら全タスクを終えて最終 PR に載せる内容を書き、Stop hook と同じく state ファイルを消して promise を出す。
+# それ以外は state ファイルを残したまま終わる（API のエラーなどの異常終了）
+cat > "$WORK/bin/claude" <<'CLAUDE'
+#!/bin/bash
+case "$*" in
+  *stream-json*) echo '{"type":"system","subtype":"init","permissionMode":"bypassPermissions"}'; exit 0 ;;
+esac
+sleep 2
+if [[ "${STUB_LOOP:-}" == promise ]]; then
+  perl -pi -e 's/^- \[ \]/- [x]/' .claude/ralph-goal.local.md
+  perl -0pi -e 's/(## 最終 PR に載せる内容\n[^\n]*\n)/$1- テストでしたこと\n/' .claude/ralph-state.local.md
+  rm -f .claude/ralph-loop.local.md
+  echo '<promise>SMOKE DONE</promise>'
+else
+  echo 'API Error: Connection refused'
+  exit 1
+fi
+CLAUDE
+chmod +x "$WORK/bin/gh" "$WORK/bin/claude"
 export PATH="$WORK/bin:$PATH"
 export HOME="$WORK/home"
 echo '{"enabledPlugins":{"ralph-loop@claude-plugins-official":true}}' > "$HOME/.claude/settings.json"
@@ -245,6 +268,55 @@ ok "decision-log の再開では、未完了タスクが 0 件でも起動する
 [[ -d "$WORK/repos/myapp-ralph-a" ]] || fail "スロットを作り直していない"
 grep -q '{{' "$CTL/.claude/ralph-playbook.local.md" && fail "埋めた playbook を雛形で上書きした"
 ok "2 回目の ralph-setup.sh は埋めた playbook を残し、スロットを作り直す"
+
+# ---- askhub-manual.sh の見張り役 ------------------------------------------------------------
+# launch はループと一緒に見張り役を起動し、ループが promise を出して終わったら final で最終 PR を作る
+printf 'repository=example/myapp-ios\ndiscussion=1\nepic=epic/smoke\nbase_branch=develop\nrunner=test\n' > "$CTL/.claude/askhub-manual.local.txt"
+manual() { (cd "$APP" && ASKHUB_LOG_DIR="$WORK/logs" ASKHUB_FINAL_WATCH_INTERVAL=1 GH_LOG="$WORK/gh.log" scripts/askhub-manual.sh "$@"); }
+loop_log() { sed -n 's/^log=//p' "$CTL/.claude/askhub-manual.local.txt" | tail -n 1; }
+wait_watch() { # 見張り役が結果をログに書くまで待つ（最大 30 秒）
+  local n=0
+  until grep -Eq '最終 PR を作りました|最終 PR は作りません|最終 PR を作れませんでした' "$1" 2>/dev/null; do
+    [[ $n -lt 60 ]] || fail "見張り役が結果をログに書かない: $(cat "$1" 2>/dev/null)"
+    n=$((n + 1))
+    sleep 0.5
+  done
+}
+wait_watch_exit() { # 見張り役が終わるまで待つ（最大 30 秒）。final の後の状態の書き出しと、次の launch が記録ファイルを取り合わないように
+  local pid n=0
+  pid=$(sed -n 's/^watch_pid=//p' "$CTL/.claude/askhub-manual.local.txt" | tail -n 1)
+  [[ "$pid" =~ ^[0-9]+$ ]] || fail "見張り役の PID を記録していない"
+  while kill -0 "$pid" 2>/dev/null; do
+    [[ $n -lt 60 ]] || fail "見張り役が終わらない（PID ${pid}）"
+    n=$((n + 1))
+    sleep 0.5
+  done
+}
+printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
+: > "$WORK/gh.log"
+OUT=$(STUB_LOOP=promise manual launch "SMOKE DONE") || fail "launch が失敗した"
+grep -q '最終 PR を自動で作ります' <<<"$OUT" || fail "launch が見張り役を起動したことを知らせていない"
+wait_watch "$(loop_log)"
+grep -q -- '^pr create .*--base develop --head epic/smoke' "$WORK/gh.log" || fail "見張り役が最終 PR を作っていない: $(cat "$(loop_log)")"
+grep -q -- '--label epic-final' "$WORK/gh.log" || fail "最終 PR に epic-final を付けていない"
+grep -q 'テストでしたこと' "$WORK/gh.log" || fail "最終 PR に state の「最終 PR に載せる内容」を載せていない"
+wait_watch_exit
+ok "launch の見張り役が、ループが promise を出して終わったら最終 PR を作る"
+
+# promise を出さずに終わったとき（state ファイルが残る異常終了）は作らない
+printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
+: > "$WORK/gh.log"
+manual launch "SMOKE DONE" >/dev/null || fail "2 回目の launch が失敗した"
+wait_watch "$(loop_log)"
+grep -q '^pr create' "$WORK/gh.log" && fail "異常終了したのに最終 PR を作った"
+grep -q '完了語を出さずに終わった' "$(loop_log)" || fail "最終 PR を作らない理由をログに書いていない"
+wait_watch_exit
+(cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh >/dev/null)
+OUT=$(ASKHUB_AUTO_FINAL=0 manual launch "SMOKE DONE") || fail "ASKHUB_AUTO_FINAL=0 の launch が失敗した"
+grep -q '自動では作りません' <<<"$OUT" || fail "ASKHUB_AUTO_FINAL=0 で見張り役を起動しないことを知らせていない"
+until ! kill -0 "$(cat "$CTL/.claude/askhub-loop.pid")" 2>/dev/null; do sleep 0.5; done
+(cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh >/dev/null)
+ok "promise を出さずに終わったときと ASKHUB_AUTO_FINAL=0 のときは、最終 PR を作らない"
 
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e

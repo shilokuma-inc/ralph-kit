@@ -214,7 +214,7 @@ promise は完全一致でしか成立せず「詰まった」を表現できな
 - 判断ログ Issue には `decision-log`、実機確認 Issue には `needs-verify` を付ける（AskHub の「任意判断」「実機確認」に出る）
 - 実機確認 Issue の本文の**先頭**に `ask-hub:verify` の目印を置く（AskHub が元の PR 番号を一覧に出す。「実機確認の扱い」の例を参照）
 - 最終 PR はループで作らない。通常の自動ループではオーケストレーターが「最終 PR に載せる内容」を読んで作り、
-  手動ループ（manual-loop）では担当者が `scripts/askhub-manual.sh final` で作る
+  手動ループ（manual-loop）ではループが promise を出して終わったとき、`launch` / `resume` が起動した見張り役が `scripts/askhub-manual.sh final` で作る
 - 不足しているプロトコルのラベルは `ralph-setup.sh` が作る
 
 セットアップ（Mac ごとの手順・設定ファイル）は ask-hub-apple の `docs/orchestrator.md` を参照。
@@ -257,13 +257,19 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    MDM や組織の管理設定で禁止された Mac（エラーにならずにすべての操作が拒否されてループが進まない）では `auto` モードで起動する。
    どちらも使えなければ、理由を出して起動しない。担当者が手で確かめたり選んだりする必要はない）
    （指示を受けた会話そのものはループにならない。ログは `~/Library/Logs/askhub/manual/`）
+   あわせて、ループの終了を待つ見張り役（シェル）を裏で起動する（下の 6）。`resume` も同じ
 4. 周回中は、playbook の STEP D が `scripts/askhub-manual.sh status` を呼び、loop-status を書き手 `manual`・回している人つきで書く（10 分に 1 回まで）。
    promise を出す直前に `status --stopping` を呼ぶ（回答待ちの PR を書き、AskHub が回答のそろったところで担当者に再開を促す）
    書き込む Issue はオーケストレーターと同じ選び方で決める（信用する author が作った `loop-status` の Issue のうち、open で最も新しく更新されたもの。
    無ければ閉じたもののうち最も新しく更新されたものを開き直す。1 つも無ければ担当者のアカウントで作る）
 5. 回答がそろったら（AskHub に「回答がそろいました」が出る）、再開の指示を受けて `scripts/askhub-manual.sh resume`
-6. ループが全タスクを終えたら（AskHub の「手動ループ」に「最終 PR の指示をコピー」が出る）、最終 PR の指示を受けて、
-   **制御用 worktree の外で** `scripts/askhub-manual.sh final`。ゴール元の目印つきの最終 PR（`epic-final`）を作る。
+6. ループが全タスクを終えて promise を出すと、見張り役が**制御用 worktree の外（メインの checkout）で** `scripts/askhub-manual.sh final` を流し、
+   ゴール元の目印つきの最終 PR（`epic-final`）を作る（自動ループでオーケストレーターが作るのと同じ。担当者の指示は要らない）。
+   見張り役はメインの checkout で動くシェルで、ループの Claude ではないので、ループの deny（`gh pr create --base develop`）には当たらない。
+   promise を出さずに終わったとき（API のエラーなどの異常終了・`ralph-stop.sh` での停止・無進捗での停止）は作らない。
+   結果はループのログに `[askhub-manual …]` の行で残る。`ASKHUB_AUTO_FINAL=0` を付けて `launch` / `resume` すると、見張り役を起動しない。
+   見張り役が動かなかったとき（Mac の再起動・ログアウトなど）や `ASKHUB_AUTO_FINAL=0` のときは、AskHub の「手動ループ」の
+   「最終 PR の指示をコピー」から最終 PR の指示を受けて、**制御用 worktree の外で** `scripts/askhub-manual.sh final` を流す。
    goal に未完了のタスク（`※回答待ち` のものを除く）が残っていれば作らない。回答待ちの PR だけが残っているときは作り（自動ループと同じ）、その時点で open な回答待ちの PR を本文の「回答待ちの PR」に載せる。
    `※回答待ち` のタスクは、goal に書いた PR（`※回答待ち（PR #123 / ask id 456）`）が open な回答待ちの PR（`needs-answer`）でなければ作らない。
    マージは AskHub の「要対応」タブの「マージ待ち」から（マージするとゴール元の Discussion が閉じる）。
