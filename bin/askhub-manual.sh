@@ -120,8 +120,10 @@ refresh_trusted_authors() {
 # ---- 状態用の Issue（loop-status）--------------------------------------------------------
 
 iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-iso_of() { date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ; }
-mtime() { stat -f %m "$1" 2>/dev/null || echo 0; }
+# GNU の書き方を先に試し、macOS（BSD）に戻す。GNU の stat は BSD の -f を「ファイルシステムの情報」と読んで成功するので、
+# BSD を先にすると Linux や、PATH の先に coreutils がある Mac で数字でない値になる（macOS の date・stat は GNU の -d・-c を拒む）
+iso_of() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ; }
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 
 count_lines() { grep -c -E "$1" "$2" 2>/dev/null || true; }
 
