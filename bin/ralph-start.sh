@@ -27,6 +27,42 @@ PLAYBOOK=".claude/ralph-playbook.local.md"
 [[ -f "$PLAYBOOK" ]] || { echo "$PLAYBOOK がありません" >&2; exit 1; }
 [[ -f "$STATE"    ]] && { echo "ループが実行中です。停止するには scripts/ralph-stop.sh" >&2; exit 1; }
 
+# kit の playbook が更新されていたら、起動の前に制御用 worktree の playbook へ取り込む（埋めた値・この epic の書き足しは残す）。
+# ralph-setup.sh が初回にコピーした kit の playbook（BASE）を共通の祖先にして 3-way merge する。
+# 衝突したとき・新しいプレースホルダが入るときは取り込まず、今の playbook のまま起動する
+KIT_DIR="${RALPH_KIT_DIR:-$(cd "$(dirname "$0")/.." && pwd -P)}"
+BASE=".claude/ralph-playbook.base.local.md"
+refresh_playbook() {
+  local new="$KIT_DIR/playbook.md" merged conflicts=0
+  [[ -f "$new" ]] || return 0
+  if [[ ! -f "$BASE" ]]; then
+    echo "注意: $PLAYBOOK をコピーした kit の playbook の記録（${BASE}）が無いため、kit の更新を取り込みません（kit 1.1 より前に始めた epic）" >&2
+    return 0
+  fi
+  cmp -s "$BASE" "$new" && return 0
+  # 一時ファイルは制御用 worktree の外に作る（残っても統合ブランチに載らないように）
+  merged=$(mktemp "${TMPDIR:-/tmp}/ralph-playbook.XXXXXX")
+  cp "$PLAYBOOK" "$merged"
+  git merge-file -q "$merged" "$BASE" "$new" || conflicts=$?
+  if [[ "$conflicts" -ne 0 ]]; then
+    rm -f "$merged"
+    echo "注意: kit の playbook の更新が $PLAYBOOK の書き換えと重なったため、取り込みませんでした（今の playbook のまま起動します）。" >&2
+    echo "      kit の playbook（${new}）と見比べて手で取り込み、取り込んだら $BASE を kit の playbook で置き換えてください" >&2
+    return 0
+  fi
+  if grep -q '{{[A-Z_][A-Z_]*}}' "$merged"; then
+    rm -f "$merged"
+    echo "注意: kit の playbook の更新に新しいプレースホルダがあるため、取り込みませんでした（今の playbook のまま起動します）。" >&2
+    echo "      kit の playbook（${new}）と見比べて手で取り込み、取り込んだら $BASE を kit の playbook で置き換えてください" >&2
+    return 0
+  fi
+  cat "$merged" > "$PLAYBOOK"
+  rm -f "$merged"
+  cp "$new" "$BASE"
+  echo "kit の playbook の更新を $PLAYBOOK に取り込みました（kit: ${RALPH_KIT_REF:-local} ${RALPH_KIT_SHA:-}）" >&2
+}
+refresh_playbook
+
 LEFTOVER=$(grep -o '{{[A-Z_][A-Z_]*}}' "$PLAYBOOK" | sort -u || true)
 if [[ -n "$LEFTOVER" ]]; then
   echo "$PLAYBOOK に未置換のプレースホルダが残っています:" >&2

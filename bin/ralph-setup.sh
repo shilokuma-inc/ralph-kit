@@ -152,8 +152,12 @@ grep -qxF '.claude/*.local.md' "$EXCLUDE" 2>/dev/null || echo '.claude/*.local.m
 # テンプレートを制御用 worktree へ配置
 mkdir -p "$CTL/.claude"
 LOCAL_PB="$CTL/.claude/ralph-playbook.local.md"
-if [[ -f "$LOCAL_PB" ]]; then
-  # テンプレートは初回しかコピーしない（置換済みの playbook を壊さないため）。
+# 初回にコピーした kit の playbook。ralph-start.sh が、これを共通の祖先にして kit の更新を 3-way merge で取り込む
+BASE_PB="$CTL/.claude/ralph-playbook.base.local.md"
+if [[ -f "$LOCAL_PB" && -f "$BASE_PB" ]]; then
+  : # kit の更新は ralph-start.sh（launch・resume）が取り込む
+elif [[ -f "$LOCAL_PB" ]]; then
+  # 祖先の記録が無い playbook（kit 1.1 より前に始めた epic）は、置換済みの内容を壊さないよう書き換えない。
   # そのため改善が既存の制御用 worktree に届かない。見出し単位で不足を報告する。
   MISSING=$(comm -23 \
     <(grep -E '^#{2,3} ' "$KIT_DIR/playbook.md" | sort -u) \
@@ -165,6 +169,7 @@ if [[ -f "$LOCAL_PB" ]]; then
   fi
 else
   cp "$KIT_DIR/playbook.md" "$LOCAL_PB"
+  cp "$KIT_DIR/playbook.md" "$BASE_PB"
 fi
 [[ -f "$CTL/.claude/ralph-goal.local.md" ]] \
   || cp "$KIT_DIR/templates/goal.md" "$CTL/.claude/ralph-goal.local.md"

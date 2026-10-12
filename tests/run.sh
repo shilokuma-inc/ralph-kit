@@ -162,6 +162,36 @@ if (cd "$CTL" && ../myapp-ios/scripts/ralph-start.sh "SMOKE DONE" >/dev/null 2>&
 [[ ! -e "$CTL/.claude/ralph-loop.local.md" ]] || fail "ralph-stop.sh が state を消していない"
 ok "ralph-start.sh が state を作り、ralph-stop.sh が消す"
 
+# kit の playbook の更新は、起動のたびに 3-way merge で取り込む（埋めた値は残す）
+cmp -s "$KITDIR/playbook.md" "$CTL/.claude/ralph-playbook.base.local.md" || fail "ralph-setup.sh が祖先の playbook を記録していない"
+make_kit() { # $1=作る場所 $2=playbook を書き換える perl の式
+  rm -rf "$1"
+  cp -R "$KITDIR" "$1"
+  perl -0pi -e "$2" "$1/playbook.md"
+}
+ANCHOR='promise は完全一致でしか成立しないため'
+make_kit "$WORK/kit-add" "s/($ANCHOR[^\n]*\n)/\$1kit で足した行\n/"
+(cd "$CTL" && RALPH_KIT_DIR="$WORK/kit-add" ../myapp-ios/scripts/ralph-start.sh "SMOKE DONE" >/dev/null 2>"$WORK/start.err") || { cat "$WORK/start.err" >&2; fail "kit の更新があると起動しない"; }
+grep -qx 'kit で足した行' "$CTL/.claude/ralph-playbook.local.md" || fail "kit の更新を取り込んでいない"
+grep -q '{{' "$CTL/.claude/ralph-playbook.local.md" && fail "取り込みで埋めた値が雛形に戻った"
+cmp -s "$WORK/kit-add/playbook.md" "$CTL/.claude/ralph-playbook.base.local.md" || fail "取り込んだ後に祖先を更新していない"
+(cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh >/dev/null)
+ok "起動のたびに kit の playbook の更新を取り込み、埋めた値は残す"
+
+# 埋めた行を kit も書き換えたとき（衝突）と、新しいプレースホルダが入るときは、取り込まずに起動する
+cp "$CTL/.claude/ralph-playbook.local.md" "$WORK/before.md"
+make_kit "$WORK/kit-conflict" "s/($ANCHOR[^\n]*\n)/\$1kit で足した行\n/; s/- 作業スロット: /- 作業用のスロット: /"
+(cd "$CTL" && RALPH_KIT_DIR="$WORK/kit-conflict" ../myapp-ios/scripts/ralph-start.sh "SMOKE DONE" >/dev/null 2>"$WORK/start.err") || { cat "$WORK/start.err" >&2; fail "衝突したときに起動しない"; }
+cmp -s "$WORK/before.md" "$CTL/.claude/ralph-playbook.local.md" || fail "衝突したのに playbook を書き換えた"
+grep -q '書き換えと重なったため' "$WORK/start.err" || fail "衝突を知らせていない"
+(cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh >/dev/null)
+make_kit "$WORK/kit-placeholder" "s/($ANCHOR[^\n]*\n)/\$1kit で足した行\n新しい値: {{NEW_VALUE}}\n/"
+(cd "$CTL" && RALPH_KIT_DIR="$WORK/kit-placeholder" ../myapp-ios/scripts/ralph-start.sh "SMOKE DONE" >/dev/null 2>"$WORK/start.err") || { cat "$WORK/start.err" >&2; fail "新しいプレースホルダがあるときに起動しない"; }
+cmp -s "$WORK/before.md" "$CTL/.claude/ralph-playbook.local.md" || fail "新しいプレースホルダを取り込んだ"
+grep -q '新しいプレースホルダがある' "$WORK/start.err" || fail "新しいプレースホルダを知らせていない"
+(cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh >/dev/null)
+ok "衝突したとき・新しいプレースホルダが入るときは取り込まずに起動する"
+
 # 仮決め一覧への指示による再開は、未完了タスクが 0 件でも起動する
 printf '# ゴール\n\n- [x] 【FEAT】テスト | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
 if (cd "$CTL" && ../myapp-ios/scripts/ralph-start.sh "SMOKE DONE" >/dev/null 2>&1); then fail "未完了タスクが 0 件なのに起動した"; fi
