@@ -282,6 +282,16 @@ wait_watch() { # 見張り役が結果をログに書くまで待つ（最大 30
     sleep 0.5
   done
 }
+wait_watch_exit() { # 見張り役が終わるまで待つ（最大 30 秒）。final の後の状態の書き出しと、次の launch が記録ファイルを取り合わないように
+  local pid n=0
+  pid=$(sed -n 's/^watch_pid=//p' "$CTL/.claude/askhub-manual.local.txt" | tail -n 1)
+  [[ "$pid" =~ ^[0-9]+$ ]] || fail "見張り役の PID を記録していない"
+  while kill -0 "$pid" 2>/dev/null; do
+    [[ $n -lt 60 ]] || fail "見張り役が終わらない（PID ${pid}）"
+    n=$((n + 1))
+    sleep 0.5
+  done
+}
 printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
 : > "$WORK/gh.log"
 OUT=$(STUB_LOOP=promise manual launch "SMOKE DONE") || fail "launch が失敗した"
@@ -290,16 +300,17 @@ wait_watch "$(loop_log)"
 grep -q -- '^pr create .*--base develop --head epic/smoke' "$WORK/gh.log" || fail "見張り役が最終 PR を作っていない: $(cat "$(loop_log)")"
 grep -q -- '--label epic-final' "$WORK/gh.log" || fail "最終 PR に epic-final を付けていない"
 grep -q 'テストでしたこと' "$WORK/gh.log" || fail "最終 PR に state の「最終 PR に載せる内容」を載せていない"
+wait_watch_exit
 ok "launch の見張り役が、ループが promise を出して終わったら最終 PR を作る"
 
 # promise を出さずに終わったとき（state ファイルが残る異常終了）は作らない
-sleep 1
 printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
 : > "$WORK/gh.log"
 manual launch "SMOKE DONE" >/dev/null || fail "2 回目の launch が失敗した"
 wait_watch "$(loop_log)"
 grep -q '^pr create' "$WORK/gh.log" && fail "異常終了したのに最終 PR を作った"
 grep -q '完了語を出さずに終わった' "$(loop_log)" || fail "最終 PR を作らない理由をログに書いていない"
+wait_watch_exit
 (cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh >/dev/null)
 OUT=$(ASKHUB_AUTO_FINAL=0 manual launch "SMOKE DONE") || fail "ASKHUB_AUTO_FINAL=0 の launch が失敗した"
 grep -q '自動では作りません' <<<"$OUT" || fail "ASKHUB_AUTO_FINAL=0 で見張り役を起動しないことを知らせていない"
