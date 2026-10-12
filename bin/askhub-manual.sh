@@ -325,9 +325,11 @@ launch_loop() {
   log="$LOG_DIR/$STEM-loop-$(date +%Y%m%d-%H%M%S).log"
   initial=$(sed -n '/^---$/,/^---$/!p' "$LOOP_STATE" | sed '/^$/d')
   # この Claude Code の会話とは別に、制御用 worktree で claude -p のループを起動する（Stop hook が周回させる）
+  # 周回中に呼ぶ scripts/askhub-manual.sh status なども、起動したときと同じ版の kit を使うよう、kit の場所を渡す
+  # （中継から呼ばれたときは RALPH_KIT_DIR が export 済みだが、kit の checkout から直接呼ばれたときは無い）
   (
     cd "$CTL"
-    nohup "${ASKHUB_CLAUDE:-claude}" -p --add-dir "${CTL%-ctl}-a" --add-dir "${CTL%-ctl}-b" \
+    RALPH_KIT_DIR="$KIT_DIR" nohup "${ASKHUB_CLAUDE:-claude}" -p --add-dir "${CTL%-ctl}-a" --add-dir "${CTL%-ctl}-b" \
       --permission-mode "$permission_mode" "$initial" </dev/null >>"$log" 2>&1 &
     echo $! > "$PID_FILE"
   )
