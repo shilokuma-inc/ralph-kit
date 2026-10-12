@@ -63,6 +63,8 @@ locate() {
   [[ "$REF" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ ]] || fail "kit の版の指定が不正です: $REF"
   command -v git >/dev/null 2>&1 || fail "git が見つかりません"
   mkdir -p "$CACHE" || fail "kit の置き場所を作れません: $CACHE"
+  # 相対パスで指定されても、ほかの場所へ cd した後（launch の起動など）に kit を見つけられるよう、絶対パスにする
+  CACHE=$(cd "$CACHE" && pwd -P)
   if lock; then
     fetch_and_extract
     unlock

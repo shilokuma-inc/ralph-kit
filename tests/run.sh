@@ -7,7 +7,8 @@
 set -euo pipefail
 
 KIT=$(cd "$(dirname "$0")/.." && pwd -P)
-WORK=$(mktemp -d)
+# macOS の一時ディレクトリはシンボリックリンク（/var → /private/var）なので、実体のパスにしておく（中継が返すパスと比べるため）
+WORK=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$WORK"' EXIT
 
 PASSED=0
@@ -161,6 +162,8 @@ perl -pi -e 's/echo "\$REF \$SHA"/echo "OLD \$REF \$SHA"/' "$APP/scripts/ralph-k
 ok "取得した kit の中継がリポジトリのものと違えば、そちらに任せる"
 
 [[ "$(RALPH_KIT_REF=next "$APP/scripts/ralph-kit.sh" version)" == "next $NEXT_SHA" ]] || fail "RALPH_KIT_REF でブランチを指定できない"
+[[ "$(cd "$WORK" && RALPH_KIT_CACHE=cache "$APP/scripts/ralph-kit.sh" path)" == "$(cd "$WORK" && pwd -P)/cache/$HEAD_SHA" ]] \
+  || fail "相対パスの RALPH_KIT_CACHE を絶対パスにしていない"
 [[ "$(RALPH_KIT_DIR="$KIT" "$APP/scripts/ralph-kit.sh" path)" == "$KIT" ]] || fail "RALPH_KIT_DIR を使っていない"
 if RALPH_KIT_REF=--upload-pack=x "$APP/scripts/ralph-kit.sh" version >/dev/null 2>&1; then fail "- で始まる版を受け付けた"; fi
 if RALPH_KIT_REF=no-such-ref "$APP/scripts/ralph-kit.sh" version >/dev/null 2>&1; then fail "無い版で成功した"; fi
