@@ -349,15 +349,18 @@ launch_loop() {
 # 見張り役はメインの checkout で動くシェルで、ループの Claude ではないので、ループの deny（gh pr create --base develop）には当たらない。
 # ASKHUB_AUTO_FINAL=0 なら起動しない（担当者が final を流す）
 start_final_watch() {
-  local pid="$1" log="$2"
+  local pid="$1" log="$2" watch_pid
   if [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
     echo "ASKHUB_AUTO_FINAL=0 のため、最終 PR は自動では作りません（ループが終わったら scripts/askhub-manual.sh final）"
     return 0
   fi
-  (
+  watch_pid=$(
     cd "$MAIN"
     RALPH_KIT_DIR="$KIT_DIR" nohup "$KIT_DIR/bin/askhub-manual.sh" watch-final "$pid" "$log" </dev/null >>"$log" 2>&1 &
+    echo $!
   )
+  # 見張り役が動いているかを外から確かめられるように残す（見張り役は final の後も状態の書き出しで記録ファイルを書く）
+  state_set watch_pid "$watch_pid"
   echo "ループが完了語を出して終わったら、最終 PR を自動で作ります（作れなかったときは scripts/askhub-manual.sh final）"
 }
 
