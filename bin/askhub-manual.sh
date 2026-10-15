@@ -1,10 +1,16 @@
 #!/bin/bash
 # 手動ループ（manual-loop）を、担当者の Mac と Claude アカウントで回すための補助スクリプト。
 #   usage: scripts/askhub-manual.sh start <Discussion 番号> <epic/機能名>
-#          scripts/askhub-manual.sh launch <完了語>
-#          scripts/askhub-manual.sh status [--stopping]
-#          scripts/askhub-manual.sh resume
-#          scripts/askhub-manual.sh final
+#          scripts/askhub-manual.sh launch [<Discussion 番号>] <完了語>
+#          scripts/askhub-manual.sh status [<Discussion 番号>] [--stopping]
+#          scripts/askhub-manual.sh resume [<Discussion 番号>]
+#          scripts/askhub-manual.sh final [<Discussion 番号>]
+#
+# 作業場所は Discussion ごとに分ける。同じリポジトリの手動ループを、同じ Mac でも並べて回せる（ask-hub-apple の Discussion #425）:
+#   制御用 worktree は <名前>-ralph-d<番号>-ctl、スロットは <名前>-ralph-d<番号>-a / -b（<名前> はメインの checkout のディレクトリ名から -ios を除いたもの）。
+#   オーケストレーターの自動ループの <名前>-ralph-ctl には触らない。
+#   Discussion の番号を省くと、制御用 worktree・スロットの中ではそのループを、ほかの場所ではこの Mac の手動ループが 1 つだけならそれを使う。
+#   kit 1.3 までに <名前>-ralph-ctl で始めた手動ループは、移さずにその場所のまま最後まで回す
 #
 # 流れ（担当者の Claude Code が、AskHub からコピーした指示を受けて行う）:
 #   1. start:  担当者が自分か確かめ、ralph-setup.sh で制御用 worktree とスロットを作り、epic を origin に push してから ready-for-loop を外す。
@@ -44,13 +50,11 @@ COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) 
 MAIN=$(dirname "$COMMON_DIR")
 NAME=$(basename "$MAIN")
 STEM="${NAME%-ios}"
-CTL="$(dirname "$MAIN")/$STEM-ralph-ctl"
-STATE_FILE="$CTL/.claude/askhub-manual.local.txt"
-LOOP_STATE="$CTL/.claude/ralph-loop.local.md"
-GOAL="$CTL/.claude/ralph-goal.local.md"
-RALPH_STATE="$CTL/.claude/ralph-state.local.md"
-PLAYBOOK="$CTL/.claude/ralph-playbook.local.md"
-PID_FILE="$CTL/.claude/askhub-loop.pid"
+PARENT=$(dirname "$MAIN")
+# オーケストレーターの自動ループの制御用 worktree（kit 1.3 までは、手動ループもここを使っていた）
+LEGACY_CTL="$PARENT/$STEM-ralph-ctl"
+# 手動ループの記録。制御用 worktree にこれがあれば、playbook は手動ループとして status を書く
+RECORD=".claude/askhub-manual.local.txt"
 LOG_DIR="${ASKHUB_LOG_DIR:-$HOME/Library/Logs/askhub/manual}"
 BASE_BRANCH="${ASKHUB_BASE_BRANCH:-develop}"
 STATUS_INTERVAL=600
@@ -59,8 +63,104 @@ REPOSITORY=$(cd "$MAIN" && gh repo view --json nameWithOwner --jq .nameWithOwner
 OWNER="${REPOSITORY%%/*}"
 REPO="${REPOSITORY#*/}"
 
+# ---- ループ（Discussion）ごとの作業場所 ------------------------------------------------------
+
+# Discussion の手動ループの制御用 worktree（スロットは末尾の -ctl を -a / -b にしたもの）
+manual_ctl() { printf '%s\n' "$PARENT/$STEM-ralph-d$1-ctl"; }
+
+# 記録ファイル（key=value）の値
+record_get() { [[ -f "$1" ]] && sed -n "s/^$2=//p" "$1" | tail -1; return 0; }
+
+# 使うループを決める。以降の関数は、このループの記録・state・goal を読み書きする
+use_loop() {
+  LOOP_DISCUSSION="$1"
+  CTL="$2"
+  STATE_FILE="$CTL/$RECORD"
+  LOOP_STATE="$CTL/.claude/ralph-loop.local.md"
+  GOAL="$CTL/.claude/ralph-goal.local.md"
+  RALPH_STATE="$CTL/.claude/ralph-state.local.md"
+  PLAYBOOK="$CTL/.claude/ralph-playbook.local.md"
+  PID_FILE="$CTL/.claude/askhub-loop.pid"
+}
+
+# kit 1.3 までに固定パス（<名前>-ralph-ctl）で始めた、その Discussion の手動ループがあるか。
+# 記録の epic を今も checkout しているときだけにする（オーケストレーターが同じ場所を自動ループに使っていれば、その記録は古い）
+legacy_loop() {
+  local record="$LEGACY_CTL/$RECORD"
+  [[ "$(record_get "$record" discussion)" == "$1" ]] || return 1
+  [[ "$(git -C "$LEGACY_CTL" symbolic-ref --short -q HEAD 2>/dev/null || true)" == "$(record_get "$record" epic)" ]]
+}
+
+# Discussion の手動ループの制御用 worktree。新しい場所が無く、固定パスにその Discussion の手動ループがあれば、そこを使い続ける（移さない）
+ctl_for() {
+  local ctl
+  ctl=$(manual_ctl "$1")
+  if [[ ! -e "$ctl" ]] && legacy_loop "$1"; then
+    ctl="$LEGACY_CTL"
+  fi
+  printf '%s\n' "$ctl"
+}
+
+# この Mac にある、このリポジトリの手動ループ（「番号<TAB>制御用 worktree」）
+manual_loops() {
+  local record ctl n
+  for record in "$PARENT/$STEM-ralph-d"*"-ctl/$RECORD" "$LEGACY_CTL/$RECORD"; do
+    [[ -f "$record" ]] || continue
+    ctl="${record%"/$RECORD"}"
+    n=$(record_get "$record" discussion)
+    [[ "$n" =~ ^[0-9]+$ && "$(ctl_for "$n")" == "$ctl" ]] || continue
+    printf '%s\t%s\n' "$n" "$ctl"
+  done
+}
+
+# 制御用 worktree・スロットの中から呼ばれたら、そのループの Discussion の番号（ループの Claude が status を呼ぶとき）
+loop_from_cwd() {
+  local top base rest
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  [[ "$(cd "$(dirname "$top")" && pwd -P)" == "$(cd "$PARENT" && pwd -P)" ]] || return 0
+  base=$(basename "$top")
+  rest="${base#"$STEM-ralph-"}"
+  [[ "$rest" != "$base" ]] || return 0
+  if [[ "$rest" =~ ^d([0-9]+)-(ctl|a|b)$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  elif [[ "$rest" =~ ^(ctl|a|b)$ ]]; then
+    # 固定パス（kit 1.3 までの手動ループ）。手動ループの記録が無ければ空
+    record_get "$LEGACY_CTL/$RECORD" discussion
+  fi
+}
+
+# start 以外で使うループを決める。番号を省いたら、呼ばれた場所か、この Mac の手動ループが 1 つだけのときはそれを使う
+resolve_loop() {
+  local n="${1:-}" loops count
+  [[ -n "$n" ]] || n=$(loop_from_cwd)
+  if [[ -z "$n" ]]; then
+    loops=$(manual_loops)
+    count=$(printf '%s' "$loops" | grep -c . || true)
+    if [[ "$count" -eq 0 ]]; then
+      fail "この Mac に、このリポジトリの手動ループの記録がありません（先に start を実行してください）"
+    elif [[ "$count" -gt 1 ]]; then
+      fail "この Mac に、このリポジトリの手動ループが複数あります。Discussion の番号を付けて実行してください（$(cut -f 1 <<<"$loops" | sed 's/^/#/' | paste -sd ' ' -)）"
+    fi
+    n=$(cut -f 1 <<<"$loops")
+  fi
+  use_loop "$n" "$(ctl_for "$n")"
+  [[ -f "$STATE_FILE" ]] || fail "Discussion #$n の手動ループの記録がありません（先に start を実行してください）"
+  # start で記録した base branch を、resume・final でも使う（ASKHUB_BASE_BRANCH を付け忘れても、開始時と同じ base になるように）
+  local recorded
+  recorded=$(state_get base_branch)
+  if [[ -n "$recorded" ]]; then BASE_BRANCH="$recorded"; fi
+}
+
+# 制御用 worktree とスロットを用意する（ralph-setup.sh は既存の worktree を再利用し、片付け済みのスロットは作り直す）。
+# 固定パスで始めたループは、その場所のまま
+setup_worktrees() {
+  local id=""
+  [[ "$CTL" == "$LEGACY_CTL" ]] || id="d$LOOP_DISCUSSION"
+  (cd "$MAIN" && RALPH_LOOP_ID="$id" "$KIT_DIR/bin/ralph-setup.sh" "$1" "$BASE_BRANCH" >/dev/null)
+}
+
 # 記録（key=value）を読む・書く
-state_get() { [[ -f "$STATE_FILE" ]] && sed -n "s/^$1=//p" "$STATE_FILE" | tail -1; return 0; }
+state_get() { record_get "$STATE_FILE" "$1"; }
 state_set() {
   mkdir -p "$(dirname "$STATE_FILE")"
   touch "$STATE_FILE"
@@ -69,12 +169,6 @@ state_set() {
   { [[ -n "$rest" ]] && printf '%s\n' "$rest"; printf '%s=%s\n' "$1" "$2"; } > "$STATE_FILE.tmp"
   mv "$STATE_FILE.tmp" "$STATE_FILE"
 }
-
-# start で記録した base branch を、resume・final でも使う（ASKHUB_BASE_BRANCH を付け忘れても、開始時と同じ base になるように）
-if [[ "$COMMAND" != start ]]; then
-  RECORDED_BASE=$(state_get base_branch)
-  if [[ -n "$RECORDED_BASE" ]]; then BASE_BRANCH="$RECORDED_BASE"; fi
-fi
 
 viewer() { gh api user --jq .login; }
 
@@ -304,7 +398,7 @@ loop_permission_mode() {
 launch_loop() {
   local promise="$1"
   command -v "${ASKHUB_CLAUDE:-claude}" >/dev/null 2>&1 || fail "claude が見つかりません"
-  loop_alive && fail "ループは既に動いています（PID $(cat "$PID_FILE")）。止めるには scripts/ralph-stop.sh"
+  loop_alive && fail "Discussion #$LOOP_DISCUSSION のループは既に動いています（PID $(cat "$PID_FILE")）。止めるには、$CTL で scripts/ralph-stop.sh"
   # 権限モードは、ループの state ファイルをよけてから確かめる（確認の起動がループの Stop hook に捕まらないように）。
   # 確かめられない・新しい state を作れない・途中で中断されたときは元に戻して止める（止まったループの状態を status が正しく出せるように）
   local saved_state="" permission_mode
@@ -326,7 +420,8 @@ launch_loop() {
   fi
   mkdir -p "$LOG_DIR"
   local log initial
-  log="$LOG_DIR/$STEM-loop-$(date +%Y%m%d-%H%M%S).log"
+  # 同じリポジトリのほかの手動ループと取り違えないよう、Discussion の番号を入れる
+  log="$LOG_DIR/$STEM-d$LOOP_DISCUSSION-loop-$(date +%Y%m%d-%H%M%S).log"
   initial=$(sed -n '/^---$/,/^---$/!p' "$LOOP_STATE" | sed '/^$/d')
   # この Claude Code の会話とは別に、制御用 worktree で claude -p のループを起動する（Stop hook が周回させる）
   # 周回中に呼ぶ scripts/askhub-manual.sh status なども、起動したときと同じ版の kit を使うよう、kit の場所を渡す
@@ -351,17 +446,17 @@ launch_loop() {
 start_final_watch() {
   local pid="$1" log="$2" watch_pid
   if [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
-    echo "ASKHUB_AUTO_FINAL=0 のため、最終 PR は自動では作りません（ループが終わったら scripts/askhub-manual.sh final）"
+    echo "ASKHUB_AUTO_FINAL=0 のため、最終 PR は自動では作りません（ループが終わったら scripts/askhub-manual.sh final $LOOP_DISCUSSION）"
     return 0
   fi
   watch_pid=$(
     cd "$MAIN"
-    RALPH_KIT_DIR="$KIT_DIR" nohup "$KIT_DIR/bin/askhub-manual.sh" watch-final "$pid" "$log" </dev/null >>"$log" 2>&1 &
+    RALPH_KIT_DIR="$KIT_DIR" nohup "$KIT_DIR/bin/askhub-manual.sh" watch-final "$LOOP_DISCUSSION" "$pid" "$log" </dev/null >>"$log" 2>&1 &
     echo $!
   )
   # 見張り役が動いているかを外から確かめられるように残す（見張り役は final の後も状態の書き出しで記録ファイルを書く）
   state_set watch_pid "$watch_pid"
-  echo "ループが完了語を出して終わったら、最終 PR を自動で作ります（作れなかったときは scripts/askhub-manual.sh final）"
+  echo "ループが完了語を出して終わったら、最終 PR を自動で作ります（作れなかったときは scripts/askhub-manual.sh final $LOOP_DISCUSSION）"
 }
 
 # 見張り役がループのログに書く 1 行
@@ -405,13 +500,11 @@ case "$COMMAND" in
     if [[ "$(printf '%s' "$ASSIGNEE" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$ME" | tr '[:upper:]' '[:lower:]')" && "${ASKHUB_MANUAL_FORCE:-}" != 1 ]]; then
       fail "この手動ループの担当者は @$ASSIGNEE です（あなたは @${ME}）。担当を変えるときは、Discussion に担当のコメントを付け直してください"
     fi
+    # 作業場所はこの Discussion のもの（ほかの手動ループ・オーケストレーターの自動ループとは分ける）
+    use_loop "$DISCUSSION" "$(ctl_for "$DISCUSSION")"
     # 同じ Discussion でも、動いているループの記録（完了語など）を消さないように拒否する
-    loop_alive && fail "制御用 worktree でループが動いています（PID $(cat "$PID_FILE")）。止めてから start を実行してください（止めるには scripts/ralph-stop.sh）"
-    PREVIOUS=$(state_get discussion)
-    if [[ -n "$PREVIOUS" && "$PREVIOUS" != "$DISCUSSION" && -f "$LOOP_STATE" ]]; then
-      fail "制御用 worktree で Discussion #$PREVIOUS の手動ループが途中です。終わってから始めてください"
-    fi
-    (cd "$MAIN" && "$KIT_DIR/bin/ralph-setup.sh" "$EPIC" "$BASE_BRANCH" >/dev/null)
+    loop_alive && fail "Discussion #$DISCUSSION の手動ループが動いています（PID $(cat "$PID_FILE")）。止めてから start を実行してください（止めるには、$CTL で scripts/ralph-stop.sh）"
+    setup_worktrees "$EPIC"
     # 子 PR の base になるので、epic を origin に置いておく（ralph-setup.sh は push しない）
     git -C "$MAIN" push --quiet -u origin "$EPIC" || fail "$EPIC を origin に push できません"
     # 準備と push が済んでから ready-for-loop を外す（途中で失敗したとき、ラベルだけ外れた状態を残さない）
@@ -432,23 +525,42 @@ case "$COMMAND" in
      - TRUSTED_AUTHORS: $TRUSTED
      - GOAL_SOURCE: Discussion #$DISCUSSION
      - INTEGRATION_BRANCH: $EPIC / BASE_BRANCH: $BASE_BRANCH
+     - WORKTREE_CTL: $CTL
+     - WORKTREE_A: ${CTL%-ctl}-a / WORKTREE_B: ${CTL%-ctl}-b
+     - VERIFY_COMMANDS: スロットごとの場所（-derivedDataPath など）は、スロットのパスから作る（同じリポジトリのほかのループと共有しない）
   2. playbook の STEP A に沿って $GOAL を作る（Discussion の、信用する author の本文・コメント・返信だけを使う）
   3. 完了語を決めて、ループを起動する:
-       scripts/askhub-manual.sh launch "<完了語>"
+       scripts/askhub-manual.sh launch $DISCUSSION "<完了語>"
 NEXT
     ;;
 
   launch)
-    PROMISE="${1:-}"
+    # 番号を付けるときは launch <番号> <完了語>（番号を省いた 1 つだけの引数は完了語）
+    if [[ $# -ge 2 && "$1" =~ ^[0-9]+$ ]]; then
+      DISCUSSION="$1"
+      PROMISE="$2"
+    else
+      DISCUSSION=""
+      PROMISE="${1:-}"
+    fi
     [[ -n "$PROMISE" ]] || usage
-    [[ -f "$STATE_FILE" ]] || fail "手動ループの記録がありません（先に start を実行してください）"
+    resolve_loop "$DISCUSSION"
     refresh_trusted_authors "$(trusted_authors)"
     state_set promise "$PROMISE"
     launch_loop "$PROMISE"
     ;;
 
   status)
-    if [[ "${1:-}" == "--stopping" ]]; then
+    DISCUSSION=""
+    STOPPING=false
+    for arg in "$@"; do
+      case "$arg" in
+        --stopping) STOPPING=true ;;
+        *) [[ "$arg" =~ ^[0-9]+$ ]] || usage; DISCUSSION="$arg" ;;
+      esac
+    done
+    resolve_loop "$DISCUSSION"
+    if [[ "$STOPPING" == true ]]; then
       write_status true true
     else
       write_status false false
@@ -456,12 +568,12 @@ NEXT
     ;;
 
   resume)
-    [[ -f "$STATE_FILE" ]] || fail "手動ループの記録がありません（先に start を実行してください）"
+    [[ -z "${1:-}" || "$1" =~ ^[0-9]+$ ]] || usage
+    resolve_loop "${1:-}"
     PROMISE=$(state_get promise)
     [[ -n "$PROMISE" ]] || fail "完了語の記録がありません（launch で起動してください）"
-    EPIC=$(state_get epic)
-    # 片付け済みのスロットを作り直す（ralph-setup.sh は既存の worktree を再利用する）
-    (cd "$MAIN" && "$KIT_DIR/bin/ralph-setup.sh" "$EPIC" "$BASE_BRANCH" >/dev/null)
+    # 片付け済みのスロットを作り直す
+    setup_worktrees "$(state_get epic)"
     refresh_trusted_authors "$(trusted_authors)"
     launch_loop "$PROMISE"
     ;;
@@ -469,9 +581,10 @@ NEXT
   watch-final)
     # launch / resume が裏で起動する見張り役（担当者は呼ばない）。ループのプロセスが終わるのを待ち、
     # ループが完了語の promise を出して終わったときだけ final を流す（自動ループと同じく、異常終了したものには作らない）
-    WATCHED="${1:-}"
-    WATCHED_LOG="${2:-}"
-    [[ "$WATCHED" =~ ^[0-9]+$ && -n "$WATCHED_LOG" ]] || usage
+    [[ "${1:-}" =~ ^[0-9]+$ && "${2:-}" =~ ^[0-9]+$ && -n "${3:-}" ]] || usage
+    resolve_loop "$1"
+    WATCHED="$2"
+    WATCHED_LOG="$3"
     while kill -0 "$WATCHED" 2>/dev/null; do
       sleep "${ASKHUB_FINAL_WATCH_INTERVAL:-30}"
     done
@@ -484,18 +597,19 @@ NEXT
     # ralph-stop.sh で止めたとき・無進捗で止まったときも state ファイルは消えるので、claude -p の最後の出力（ログ）の promise でも確かめる
     PROMISE=$(state_get promise)
     if [[ -f "$LOOP_STATE" || -z "$PROMISE" ]] || ! grep -Fq "<promise>$PROMISE</promise>" "$WATCHED_LOG" 2>/dev/null; then
-      watch_note "ループが完了語を出さずに終わったため、最終 PR は作りません（続けるなら scripts/askhub-manual.sh resume）"
+      watch_note "ループが完了語を出さずに終わったため、最終 PR は作りません（続けるなら scripts/askhub-manual.sh resume $LOOP_DISCUSSION）"
       exit 0
     fi
     watch_note "ループが完了語を出して終わったので、最終 PR を作ります"
-    if ! (cd "$MAIN" && "$KIT_DIR/bin/askhub-manual.sh" final); then
-      watch_note "最終 PR を作れませんでした（上のエラーを確かめて、scripts/askhub-manual.sh final を手で流してください）"
+    if ! (cd "$MAIN" && "$KIT_DIR/bin/askhub-manual.sh" final "$LOOP_DISCUSSION"); then
+      watch_note "最終 PR を作れませんでした（上のエラーを確かめて、scripts/askhub-manual.sh final $LOOP_DISCUSSION を手で流してください）"
       exit 1
     fi
     ;;
 
   final)
-    [[ -f "$STATE_FILE" ]] || fail "手動ループの記録がありません"
+    [[ -z "${1:-}" || "$1" =~ ^[0-9]+$ ]] || usage
+    resolve_loop "${1:-}"
     # 制御用 worktree そのものか、その中なら拒否する（前方一致だと …-ralph-ctl2 のような別のディレクトリも拒否してしまう）
     if [[ -d "$CTL" ]]; then
       CTL_REAL=$(cd "$CTL" && pwd -P)
@@ -525,7 +639,7 @@ NEXT
     FINAL_STATE=$(compute_state true "$WAITING")
     case "$FINAL_STATE" in
       completed | waiting-for-answer) ;;
-      waiting-to-start) fail "goal に未完了のタスクが残っています（${GOAL}）。scripts/askhub-manual.sh resume でループを再開してください" ;;
+      waiting-to-start) fail "goal に未完了のタスクが残っています（${GOAL}）。scripts/askhub-manual.sh resume $LOOP_DISCUSSION でループを再開してください" ;;
       *) fail "ループの状態が「$(state_title "$FINAL_STATE")」のため、最終 PR を作れません" ;;
     esac
     # マージせずに閉じた PR は既存として扱わない（作り直せるように）。open かマージ済みがあれば作らない
