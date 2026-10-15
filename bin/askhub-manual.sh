@@ -14,12 +14,12 @@
 #
 # 流れ（担当者の Claude Code が、AskHub からコピーした指示を受けて行う）:
 #   1. start:  担当者が自分か確かめ、ralph-setup.sh で制御用 worktree とスロットを作り、epic を origin に push してから ready-for-loop を外す。
-#              信用する author（このリポジトリに書き込み権限を持つ人）を表示し、状態用の Issue を「開始待ち」で書く
+#              信用する author（このリポジトリに書き込み権限を持つ人）を表示し、ループの状態を「開始待ち」で書く
 #   2. （Claude が playbook の {{...}} を埋め、STEP A に沿って goal を作る）
 #   3. launch: 完了語を記録し、ralph-start.sh で state を作り、制御用 worktree で claude -p のループをバックグラウンドで起動する
 #              （bypassPermissions で起動する。MDM などで禁止された Mac では auto モード。どちらも使えなければ起動しない）
 #              あわせて見張り役（watch-final）を裏で起動し、ループが完了語を出して終わったら final を流す（ASKHUB_AUTO_FINAL=0 で止める）
-#   4. status: 状態用の Issue を書き手 manual・回している人つきで書き直す（playbook の STEP D から呼ぶ。10 分に 1 回まで）
+#   4. status: ループの状態を、状態用の Issue のこのループのコメントに、書き手 manual・回している人つきで書く（playbook の STEP D から呼ぶ。10 分に 1 回まで）
 #   5. resume: 回答が付いた後などに、記録した完了語でループを起動し直す（launch と同じく見張り役も起動する）
 #   6. final:  ループが終わったら、ゴール元の目印つきの最終 PR（epic-final）を作る。制御用 worktree の外から呼ぶ
 #              goal に未完了のタスクが残っていれば作らない（回答待ちの PR だけが残っているときは作る）
@@ -211,7 +211,9 @@ refresh_trusted_authors() {
   echo "playbook の信用する author を更新しました（${trusted}）"
 }
 
-# ---- 状態用の Issue（loop-status）--------------------------------------------------------
+# ---- ループの状態（状態用の Issue の、このループのコメント）--------------------------------
+# 状態用の Issue（loop-status）はリポジトリに 1 つ。ループ（Discussion）ごとに 1 つのコメントを置き、書き手は自分のループのコメントだけを書き換える
+# （ask-hub-apple の docs/protocol.md の「ループごとのコメントと本文の形」）。本文はオーケストレーターがリポジトリ全体の状態に使うので、手動ループは書かない
 
 iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # GNU の書き方を先に試し、macOS（BSD）に戻す。GNU の stat は BSD の -f を「ファイルシステムの情報」と読んで成功するので、
@@ -249,7 +251,7 @@ state_title() {
 
 write_status() {
   local stopping="${1:-false}" force="${2:-false}"
-  local discussion epic runner waiting state total completed deferred last checked marker issue body signature now
+  local discussion epic runner waiting state total completed deferred last checked marker body signature now
   discussion=$(state_get discussion)
   epic=$(state_get epic)
   runner=$(state_get runner)
@@ -276,9 +278,9 @@ write_status() {
   marker="$marker,\"writer\":\"manual\"}"
   body=$(cat <<BODY
 <!-- ask-hub:loop-status $marker -->
-## ループの状態
+## ループの状態（Discussion #$discussion）
 
-手動ループ（@$runner さんの Mac）が書き換える Issue です。編集・クローズしないでください。
+手動ループ（@$runner さんの Mac）が書き換えるコメントです。編集・削除しないでください（ゴール元の Discussion が閉じたら、手動ループが消します）。
 
 | 項目 | 値 |
 | --- | --- |
@@ -292,37 +294,97 @@ write_status() {
 | 確認時刻 | $checked |
 BODY
 )
-  # 信用する author が作った状態用の Issue のうち、open で最も新しく更新されたもの（無ければ閉じたもので最も新しく更新されたもの）を使う
-  # 信用する author ごとに探す（信用外の author が loop-status の Issue を大量に作っても、件数の上限で取りこぼさない）
-  local trusted author candidates=""
-  trusted=$(trusted_authors) || trusted=""
-  # 取得できないときは状態用の Issue を作らない。ループ（STEP D や launch の後）を止めないよう、警告だけ出して成功で返す
-  if [[ -z "$trusted" ]]; then
-    echo "warning: 信用する author を取得できないため、状態用の Issue を更新しません（gh auth status と、このリポジトリの権限を確認してください）" >&2
-    return 0
-  fi
-  local result
-  while IFS= read -r author; do
-    [[ -n "$author" ]] || continue
-    # 取得に失敗したときも、上と同じく警告だけ出して成功で返す（取りこぼしたまま新しい Issue を作らない）
-    if ! result=$(gh issue list -R "$REPOSITORY" --label loop-status --state all --author "$author" --limit 1000 --json number,state,updatedAt \
-                    --jq '.[] | "\(if .state == "OPEN" then 0 else 1 end)\t\(.updatedAt)\t\(.number)"'); then
-      echo "warning: @$author の状態用の Issue を取得できないため、状態用の Issue を更新しません（gh auth status を確認してください）" >&2
-      return 0
-    fi
-    candidates+="$result"$'\n'
-  done < <(printf '%s\n' "${trusted//,/$'\n'}")
-  issue=$(printf '%s' "$candidates" | sed '/^$/d' | sort -t $'\t' -k1,1n -k2,2r | head -n 1 | cut -f 3)
-  if [[ -z "$issue" ]]; then
-    gh label create loop-status -R "$REPOSITORY" --color bfdadc --description "AskHub のループの状態を書き出す Issue" >/dev/null 2>&1 || true
-    gh issue create -R "$REPOSITORY" --title "【AskHub】ループの状態" --label loop-status --body "$body" >/dev/null
-  else
-    gh issue edit "$issue" -R "$REPOSITORY" --body "$body" >/dev/null
-    gh issue reopen "$issue" -R "$REPOSITORY" >/dev/null 2>&1 || true
-  fi
+  # 書けなかったときは警告だけ出して成功で返す（ループ（STEP D や launch の後）を止めない。次の呼び出しで書き直す）
+  publish_status_comment "$body" || return 0
   state_set status_signature "$signature"
   state_set status_written_at "$now"
   echo "ループの状態を書きました: $(state_title "$state")（回答待ちの PR: ${waiting:-なし}）"
+}
+
+warn() { echo "warning: $*" >&2; }
+
+# 信用する author が作った状態用の Issue（「open なら 0・閉じていれば 1<TAB>更新日時<TAB>番号」）。
+# 信用する author ごとに探す（信用外の author が loop-status の Issue を大量に作っても、件数の上限で取りこぼさない）
+status_issue_candidates() {
+  local author result candidates=""
+  while IFS= read -r author; do
+    [[ -n "$author" ]] || continue
+    result=$(gh issue list -R "$REPOSITORY" --label loop-status --state all --author "$author" --limit 1000 --json number,state,updatedAt \
+               --jq '.[] | "\(if .state == "OPEN" then 0 else 1 end)\t\(.updatedAt)\t\(.number)"') || return 1
+    candidates+="$result"$'\n'
+  done < <(printf '%s\n' "${1//,/$'\n'}")
+  printf '%s' "$candidates" | sed '/^$/d'
+}
+
+# 状態用の Issue のうち、このループのコメント（新しく更新された順に「更新日時<TAB>コメントの id」）。
+# 同じアカウントがオーケストレーターと手動ループの両方の書き手になりうるので、author ではなく目印の discussion と writer で見分ける。
+# public リポジトリでは誰でもコメントできるので、信用する author のコメントだけを見る
+own_status_comments() {
+  gh api "repos/$REPOSITORY/issues/$1/comments?per_page=100" --paginate \
+    | jq -r --arg trusted "$2" --argjson discussion "$LOOP_DISCUSSION" '
+        ($trusted | ascii_downcase | split(",")) as $authors
+        | .[]
+        | select((.user.login // "" | ascii_downcase) as $login | any($authors[]; . == $login))
+        | ((.body // "") | sub("^\\s+"; "") | capture("^<!--\\s*ask-hub:loop-status\\s(?<json>[^\\n]*?)-->") | .json | fromjson?) as $report
+        | select(($report | type) == "object" and $report.discussion == $discussion and $report.writer == "manual")
+        | "\(.updated_at)\t\(.id)"' \
+    | sort -t $'\t' -k1,1r -k2,2nr
+}
+
+# 状態用の Issue を、手動ループが作るときの本文。ループの状態は書かない（本文はオーケストレーターがリポジトリ全体の状態を書く）
+STATUS_ISSUE_BODY='## ループの状態
+
+AskHub のループの状態を書き出す Issue です。ループの状態は、ループ（ゴール元の Discussion）ごとのコメントに書きます。編集・クローズしないでください。'
+
+# このループのコメントを書く（無ければ作る）。書けなかったときは警告を出して 1 を返す
+publish_status_comment() {
+  local body="$1" trusted me candidates chosen issue url comments newest id
+  if ! trusted=$(trusted_authors) || [[ -z "$trusted" ]]; then
+    warn "信用する author を取得できないため、ループの状態を書きません（gh auth status と、このリポジトリの権限を確認してください）"
+    return 1
+  fi
+  # 信用する author のアカウントで書く（ほかのアカウントのコメントは、AskHub もオーケストレーターも読まない）
+  if ! me=$(viewer) || ! is_trusted "$me" "$trusted"; then
+    warn "gh のアカウント（@${me:-不明}）は、このリポジトリで信用する author ではないため、ループの状態を書きません（gh auth status を確認してください）"
+    return 1
+  fi
+  # 信用する author が作った状態用の Issue のうち、open で最も新しく更新されたもの（無ければ閉じたもので最も新しく更新されたもの）を使う。
+  # 取得に失敗したときは、取りこぼしたまま新しい Issue を作らない
+  if ! candidates=$(status_issue_candidates "$trusted"); then
+    warn "状態用の Issue を取得できないため、ループの状態を書きません（gh auth status を確認してください）"
+    return 1
+  fi
+  chosen=$(printf '%s\n' "$candidates" | sed '/^$/d' | sort -t $'\t' -k1,1n -k2,2r | head -n 1)
+  if [[ -z "$chosen" ]]; then
+    gh label create loop-status -R "$REPOSITORY" --color bfdadc --description "AskHub のループの状態を書き出す Issue" >/dev/null 2>&1 || true
+    if ! url=$(gh issue create -R "$REPOSITORY" --title "【AskHub】ループの状態" --label loop-status --body "$STATUS_ISSUE_BODY") \
+      || [[ ! "${url##*/}" =~ ^[0-9]+$ ]]; then
+      warn "状態用の Issue を作れなかったため、ループの状態を書きません"
+      return 1
+    fi
+    issue="${url##*/}"
+  else
+    issue=$(cut -f 3 <<<"$chosen")
+    if [[ "$(cut -f 1 <<<"$chosen")" != 0 ]]; then
+      gh issue reopen "$issue" -R "$REPOSITORY" >/dev/null 2>&1 || true
+    fi
+  fi
+  if ! comments=$(own_status_comments "$issue" "$trusted"); then
+    warn "状態用の Issue（#${issue}）のコメントを取得できないため、ループの状態を書きません"
+    return 1
+  fi
+  newest=$(head -n 1 <<<"$comments" | cut -f 2)
+  if [[ -z "$newest" ]]; then
+    gh api -X POST "repos/$REPOSITORY/issues/$issue/comments" -f body="$body" >/dev/null \
+      || { warn "状態用の Issue（#${issue}）に、ループの状態のコメントを作れませんでした"; return 1; }
+    return 0
+  fi
+  gh api -X PATCH "repos/$REPOSITORY/issues/comments/$newest" -f body="$body" >/dev/null \
+    || { warn "状態用の Issue（#${issue}）の、ループの状態のコメントを書き換えられませんでした"; return 1; }
+  # 同じループのコメントが重なっていたら（ほぼ同時に作ったなど）、書き換えたもの以外を消す（読む側は確認時刻の新しいものを使うので、残っても壊れない）
+  for id in $(tail -n +2 <<<"$comments" | cut -f 2); do
+    gh api -X DELETE "repos/$REPOSITORY/issues/comments/$id" >/dev/null 2>&1 || true
+  done
 }
 
 # ---- ループの起動 --------------------------------------------------------------------------
