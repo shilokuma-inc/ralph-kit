@@ -9,7 +9,8 @@ set -euo pipefail
 KIT=$(cd "$(dirname "$0")/.." && pwd -P)
 # macOS の一時ディレクトリはシンボリックリンク（/var → /private/var）なので、実体のパスにしておく（中継が返すパスと比べるため）
 WORK=$(cd "$(mktemp -d)" && pwd -P)
-trap 'rm -rf "$WORK"' EXIT
+# 自動ループの代わりに動かすプロセス（後半のテスト）も止める
+trap 'kill "${AUTO_PID:-}" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 PASSED=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -19,13 +20,106 @@ ok() { echo "ok: $*"; PASSED=$((PASSED + 1)); }
 mkdir -p "$WORK/bin" "$WORK/home/.claude"
 cat > "$WORK/bin/gh" <<'GH'
 #!/bin/bash
-# テスト用の gh。リポジトリの特定・書き込み権限を持つ人・PR の作成だけ値を返し、ほかは成功だけを返す。
+# テスト用の gh。GitHub の代わりに、状態用の Issue・そのコメント・閉じた Discussion を GH_STATE のファイルで持つ。
+# 応答は JSON で作り、--jq があれば jq で絞る（本物の gh と同じく、文字列はそのまま出す）。書き込み権限を持つのは test だけ。
+# Discussion はどの番号も manual-loop 付きで test が担当。GH_STATE/closed-<番号> があれば閉じている。
 # GH_LOG があれば、呼ばれた引数をそこに書き足す
 [[ -z "${GH_LOG:-}" ]] || printf '%s\n' "$*" >> "$GH_LOG"
-case "$*" in
-  "repo view"*) echo "example/myapp-ios" ;;
-  "api repos/example/myapp-ios/collaborators"*) echo "test" ;;
-  "pr create"*) echo "https://github.com/example/myapp-ios/pull/99" ;;
+S="${GH_STATE:?}"
+mkdir -p "$S/issues" "$S/comments"
+
+jq_expr="" method="" body="" query="" number="" author=""
+positional=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --jq) jq_expr="$2"; shift ;;
+    -X) method="$2"; shift ;;
+    --body) body="$2"; shift ;;
+    --author) author="$2"; shift ;;
+    -f | -F)
+      case "$2" in
+        body=*) body="${2#body=}" ;;
+        query=*) query="${2#query=}" ;;
+        n=*) number="${2#n=}" ;;
+      esac
+      shift ;;
+    -R | --label | --state | --limit | --json | --title | --color | --description | --base | --head | --assignee) shift ;;
+    -*) ;;
+    *) positional+=("$1") ;;
+  esac
+  shift
+done
+out() { if [[ -n "$jq_expr" ]]; then jq -r "$jq_expr"; else cat; fi; }
+next_id() {
+  until mkdir "$S/lock" 2>/dev/null; do sleep 0.05; done
+  local id=$(( $(cat "$S/counter" 2>/dev/null || echo 100) + 1 ))
+  echo "$id" > "$S/counter"
+  rmdir "$S/lock"
+  echo "$id"
+}
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+comments_of() {
+  local d
+  for d in "$S/comments"/*; do
+    [[ -f "$d/issue" && "$(cat "$d/issue")" == "$1" ]] || continue
+    jq -n --argjson id "${d##*/}" --arg login "$(cat "$d/login")" --arg updated "$(cat "$d/updated")" --rawfile body "$d/body" \
+      '{id: $id, user: {login: $login}, updated_at: $updated, body: $body}'
+  done | jq -s .
+}
+endpoint="${positional[1]:-}"
+case "${positional[0]:-} ${positional[1]:-}" in
+  "repo view") echo '{"nameWithOwner":"example/myapp-ios"}' | out ;;
+  "api user") echo '{"login":"test"}' | out ;;
+  "api graphql")
+    closed=false
+    [[ -e "$S/closed-$number" ]] && closed=true
+    case "$query" in
+      *'labels(first:20)'*)
+        jq -n --arg n "$number" --argjson closed "$closed" '{data: {repository: {discussion: {id: "D_\($n)", closed: $closed, author: {login: "test"},
+          labels: {nodes: [{name: "manual-loop"}]},
+          comments: {nodes: [{author: {login: "test"}, body: "<!-- ask-hub:manual-assignee login=\"test\" -->\n@test さんが担当します"}]}}}}}' | out ;;
+      *'{ closed }'*) jq -n --argjson closed "$closed" '{data: {repository: {discussion: {closed: $closed}}}}' | out ;;
+      *) echo '{"data":{"repository":{"label":null}}}' | out ;;
+    esac ;;
+  "api repos/example/myapp-ios/collaborators"*) echo '[{"login":"test","permissions":{"push":true}}]' | out ;;
+  "api repos/example/myapp-ios/issues/"*)
+    rest="${endpoint#repos/example/myapp-ios/issues/}"
+    case "${method:-GET} $rest" in
+      "GET "*/comments*) comments_of "${rest%%/*}" | out ;;
+      "POST "*/comments)
+        id=$(next_id)
+        mkdir -p "$S/comments/$id"
+        printf '%s' "${rest%%/*}" > "$S/comments/$id/issue"
+        printf '%s' test > "$S/comments/$id/login"
+        printf '%s' "$body" > "$S/comments/$id/body"
+        now > "$S/comments/$id/updated"
+        echo "{\"id\":$id}" | out ;;
+      "PATCH comments/"*)
+        [[ -d "$S/comments/${rest#comments/}" ]] || { echo "Not Found" >&2; exit 1; }
+        printf '%s' "$body" > "$S/comments/${rest#comments/}/body"
+        now > "$S/comments/${rest#comments/}/updated" ;;
+      "DELETE comments/"*)
+        [[ -d "$S/comments/${rest#comments/}" ]] || { echo "Not Found" >&2; exit 1; }
+        rm -r "${S:?}/comments/${rest#comments/}" ;;
+    esac ;;
+  "issue list")
+    for d in "$S/issues"/*; do
+      [[ -f "$d/author" ]] || continue
+      [[ -z "$author" || "$(cat "$d/author")" == "$author" ]] || continue
+      jq -n --argjson number "${d##*/}" --arg state "$(cat "$d/state")" --arg updated "$(cat "$d/updated")" '{number: $number, state: $state, updatedAt: $updated}'
+    done | jq -s . | out ;;
+  "issue create")
+    id=$(next_id)
+    mkdir -p "$S/issues/$id"
+    printf '%s' test > "$S/issues/$id/author"
+    printf '%s' OPEN > "$S/issues/$id/state"
+    printf '%s' "$body" > "$S/issues/$id/body"
+    now > "$S/issues/$id/updated"
+    echo "https://github.com/example/myapp-ios/issues/$id" ;;
+  "issue reopen") printf '%s' OPEN > "$S/issues/${positional[2]}/state" ;;
+  "issue edit") printf '%s' "$body" > "$S/issues/${positional[2]}/body" ;;
+  "pr list") echo '[]' | out ;;
+  "pr create") echo "https://github.com/example/myapp-ios/pull/99" ;;
   *) exit 0 ;;
 esac
 GH
@@ -51,6 +145,7 @@ CLAUDE
 chmod +x "$WORK/bin/gh" "$WORK/bin/claude"
 export PATH="$WORK/bin:$PATH"
 export HOME="$WORK/home"
+export GH_STATE="$WORK/github"
 echo '{"enabledPlugins":{"ralph-loop@claude-plugins-official":true}}' > "$HOME/.claude/settings.json"
 git config --global user.name test
 git config --global user.email test@example.com
@@ -269,29 +364,46 @@ ok "decision-log の再開では、未完了タスクが 0 件でも起動する
 grep -q '{{' "$CTL/.claude/ralph-playbook.local.md" && fail "埋めた playbook を雛形で上書きした"
 ok "2 回目の ralph-setup.sh は埋めた playbook を残し、スロットを作り直す"
 
-# ---- askhub-manual.sh の見張り役 ------------------------------------------------------------
-# launch はループと一緒に見張り役を起動し、ループが promise を出して終わったら final で最終 PR を作る
+# ---- askhub-manual.sh の見張り役（kit 1.3 までの固定パスで始めた手動ループ）---------------------------
+# kit 1.3 までは、手動ループも制御用 worktree（myapp-ralph-ctl）を使っていた。途中のループは、その場所のまま最後まで回せる（番号を省いても見つける）。
+# launch はループと一緒に見張り役を起動し、ループが promise を出して終わったら final で最終 PR を作る。
+# そのあと、ゴール元の Discussion が閉じたら、ループの状態のコメントを消す
 printf 'repository=example/myapp-ios\ndiscussion=1\nepic=epic/smoke\nbase_branch=develop\nrunner=test\n' > "$CTL/.claude/askhub-manual.local.txt"
-manual() { (cd "$APP" && ASKHUB_LOG_DIR="$WORK/logs" ASKHUB_FINAL_WATCH_INTERVAL=1 GH_LOG="$WORK/gh.log" scripts/askhub-manual.sh "$@"); }
-loop_log() { sed -n 's/^log=//p' "$CTL/.claude/askhub-manual.local.txt" | tail -n 1; }
-wait_watch() { # 見張り役が結果をログに書くまで待つ（最大 30 秒）
+manual() {
+  (cd "$APP" && ASKHUB_LOG_DIR="$WORK/logs" ASKHUB_FINAL_WATCH_INTERVAL=1 ASKHUB_CLOSE_WATCH_INTERVAL=1 GH_LOG="$WORK/gh.log" \
+    scripts/askhub-manual.sh "$@")
+}
+loop_log() { sed -n 's/^log=//p' "${1:-$CTL}/.claude/askhub-manual.local.txt" | tail -n 1; }
+wait_for() { # 条件が成り立つまで待つ（最大 30 秒）
   local n=0
-  until grep -Eq '最終 PR を作りました|最終 PR は作りません|最終 PR を作れませんでした' "$1" 2>/dev/null; do
-    [[ $n -lt 60 ]] || fail "見張り役が結果をログに書かない: $(cat "$1" 2>/dev/null)"
+  until "$@"; do
+    [[ $n -lt 60 ]] || return 1
     n=$((n + 1))
     sleep 0.5
   done
 }
-wait_watch_exit() { # 見張り役が終わるまで待つ（最大 30 秒）。final の後の状態の書き出しと、次の launch が記録ファイルを取り合わないように
-  local pid n=0
-  pid=$(sed -n 's/^watch_pid=//p' "$CTL/.claude/askhub-manual.local.txt" | tail -n 1)
+wait_watch() { # 見張り役が結果をログに書くまで待つ
+  wait_for grep -Eq '最終 PR を作りました|最終 PR は作りません|最終 PR を作れませんでした' "$1" \
+    || fail "見張り役が結果をログに書かない: $(cat "$1" 2>/dev/null)"
+}
+watch_exited() {
+  local pid
+  pid=$(sed -n 's/^watch_pid=//p' "$1/.claude/askhub-manual.local.txt" | tail -n 1)
   [[ "$pid" =~ ^[0-9]+$ ]] || fail "見張り役の PID を記録していない"
-  while kill -0 "$pid" 2>/dev/null; do
-    [[ $n -lt 60 ]] || fail "見張り役が終わらない（PID ${pid}）"
-    n=$((n + 1))
-    sleep 0.5
+  ! kill -0 "$pid" 2>/dev/null
+}
+wait_watch_exit() { # 見張り役が終わるまで待つ（$1=制御用 worktree）。最後の状態の書き出しと、次の launch が記録ファイルを取り合わないように
+  wait_for watch_exited "${1:-$CTL}" || fail "見張り役が終わらない: $(cat "$(loop_log "${1:-$CTL}")")"
+}
+loop_comments() { # 状態用の Issue のコメントのうち、Discussion $1 の手動ループのもの（author が ${2:-test} のものの、目印の行）
+  local d
+  for d in "$GH_STATE/comments"/*; do
+    [[ -f "$d/body" && "$(cat "$d/login")" == "${2:-test}" ]] || continue
+    head -n 1 "$d/body" | grep -F "\"discussion\":$1," | grep -F '"writer":"manual"' || true
   done
 }
+comment_count() { loop_comments "$1" | grep -c . || true; }
+comment_has() { loop_comments "$1" | grep -qF "$2"; }
 printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
 : > "$WORK/gh.log"
 OUT=$(STUB_LOOP=promise manual launch "SMOKE DONE") || fail "launch が失敗した"
@@ -300,23 +412,128 @@ wait_watch "$(loop_log)"
 grep -q -- '^pr create .*--base develop --head epic/smoke' "$WORK/gh.log" || fail "見張り役が最終 PR を作っていない: $(cat "$(loop_log)")"
 grep -q -- '--label epic-final' "$WORK/gh.log" || fail "最終 PR に epic-final を付けていない"
 grep -q 'テストでしたこと' "$WORK/gh.log" || fail "最終 PR に state の「最終 PR に載せる内容」を載せていない"
+wait_for comment_has 1 '"state":"completed"' || fail "最終 PR を作った後に、ループの状態のコメントを完了にしていない: $(loop_comments 1)"
+[[ "$(comment_count 1)" -eq 1 ]] || fail "ループの状態のコメントが 1 つになっていない（$(comment_count 1) 件）"
+for d in "$GH_STATE/issues"/*; do
+  grep -q 'ask-hub:loop-status' "$d/body" && fail "手動ループが、状態用の Issue の本文にループの状態を書いた"
+done
+grep -q '^issue edit' "$WORK/gh.log" && fail "手動ループが、状態用の Issue の本文を書き換えた"
+touch "$GH_STATE/closed-1"
 wait_watch_exit
-ok "launch の見張り役が、ループが promise を出して終わったら最終 PR を作る"
+[[ "$(comment_count 1)" -eq 0 ]] || fail "ゴール元の Discussion が閉じたのに、ループの状態のコメントを消していない"
+grep -q 'コメントを消しました' "$(loop_log)" || fail "コメントを消したことをログに書いていない"
+grep -q '^ended_at=' "$CTL/.claude/askhub-manual.local.txt" || fail "ループを終えたことを記録していない"
+rm -f "$GH_STATE/closed-1"
+ok "固定パスで始めた手動ループも続けて回せ、見張り役が最終 PR を作り、Discussion が閉じたらループの状態のコメントを消す"
 
-# promise を出さずに終わったとき（state ファイルが残る異常終了）は作らない
+# promise を出さずに終わったとき（state ファイルが残る異常終了）は作らない（番号を付けても、固定パスのループを使う）
 printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
 : > "$WORK/gh.log"
-manual launch "SMOKE DONE" >/dev/null || fail "2 回目の launch が失敗した"
+manual launch 1 "SMOKE DONE" >/dev/null || fail "2 回目の launch が失敗した"
+grep -q '^ended_at=' "$CTL/.claude/askhub-manual.local.txt" && fail "起動し直したのに、ループを終えた記録が残っている"
 wait_watch "$(loop_log)"
 grep -q '^pr create' "$WORK/gh.log" && fail "異常終了したのに最終 PR を作った"
 grep -q '完了語を出さずに終わった' "$(loop_log)" || fail "最終 PR を作らない理由をログに書いていない"
-wait_watch_exit
 (cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh >/dev/null)
 OUT=$(ASKHUB_AUTO_FINAL=0 manual launch "SMOKE DONE") || fail "ASKHUB_AUTO_FINAL=0 の launch が失敗した"
-grep -q '自動では作りません' <<<"$OUT" || fail "ASKHUB_AUTO_FINAL=0 で見張り役を起動しないことを知らせていない"
+grep -q '自動では作りません' <<<"$OUT" || fail "ASKHUB_AUTO_FINAL=0 で最終 PR を作らないことを知らせていない"
 until ! kill -0 "$(cat "$CTL/.claude/askhub-loop.pid")" 2>/dev/null; do sleep 0.5; done
 (cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh >/dev/null)
 ok "promise を出さずに終わったときと ASKHUB_AUTO_FINAL=0 のときは、最終 PR を作らない"
+
+# ---- 手動ループを Discussion ごとの作業場所で並べる ---------------------------------------------------
+# 制御用 worktree（myapp-ralph-ctl）を、オーケストレーターの自動ループが使っている状態にする（固定パスの手動ループの記録は外す）
+rm -f "$CTL/.claude/askhub-manual.local.txt"
+printf '# ゴール\n\n- [ ] 【FEAT】自動ループのタスク | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
+(cd "$CTL" && ../myapp-ios/scripts/ralph-start.sh "AUTO DONE" >/dev/null) || fail "自動ループの state を作れない"
+sleep 600 &
+AUTO_PID=$!
+echo "$AUTO_PID" > "$CTL/.claude/askhub-loop.pid"
+auto_untouched() {
+  [[ -f "$CTL/.claude/ralph-loop.local.md" && "$(cat "$CTL/.claude/askhub-loop.pid")" == "$AUTO_PID" \
+    && ! -e "$CTL/.claude/askhub-manual.local.txt" && "$(git -C "$CTL" symbolic-ref --short HEAD)" == epic/smoke ]]
+}
+# 状態用の Issue の本文はオーケストレーターのもの。信用外の author が、手動ループの目印を真似たコメントを付けている
+for d in "$GH_STATE/issues"/*; do ISSUE="${d##*/}"; break; done
+printf '%s' '<!-- ask-hub:loop-status {"checkedAt":"2026-10-15T00:00:00Z","state":"running","writer":"orchestrator"} -->' > "$GH_STATE/issues/$ISSUE/body"
+cp "$GH_STATE/issues/$ISSUE/body" "$WORK/issue-body.before"
+mkdir -p "$GH_STATE/comments/1"
+printf '%s' "$ISSUE" > "$GH_STATE/comments/1/issue"
+printf '%s' evil > "$GH_STATE/comments/1/login"
+printf '%s' '<!-- ask-hub:loop-status {"checkedAt":"2030-01-01T00:00:00Z","discussion":101,"runner":"evil","state":"running","writer":"manual"} -->' > "$GH_STATE/comments/1/body"
+printf '%s' 2030-01-01T00:00:00Z > "$GH_STATE/comments/1/updated"
+cp "$GH_STATE/comments/1/body" "$WORK/evil.before"
+
+: > "$WORK/gh.log"
+manual start 101 epic/manual-one >"$WORK/start.out" 2>&1 || { cat "$WORK/start.out" >&2; fail "自動ループの制御用 worktree があると、手動ループを start できない"; }
+D101="$WORK/repos/myapp-ralph-d101-ctl"
+for d in "$D101" "$WORK/repos/myapp-ralph-d101-a" "$WORK/repos/myapp-ralph-d101-b"; do
+  [[ -d "$d" ]] || fail "Discussion ごとの作業場所を作っていない: $d"
+done
+[[ "$(git -C "$D101" symbolic-ref --short HEAD)" == epic/manual-one ]] || fail "Discussion ごとの制御用 worktree が epic を checkout していない"
+grep -qx 'discussion=101' "$D101/.claude/askhub-manual.local.txt" || fail "Discussion ごとの制御用 worktree に手動ループの記録が無い"
+auto_untouched || fail "手動ループの start が、自動ループの制御用 worktree に触った"
+grep -q 'WORKTREE_A: .*myapp-ralph-d101-a' "$WORK/start.out" || fail "start が Discussion ごとのスロットを表示していない"
+ok "自動ループの制御用 worktree があっても、手動ループを Discussion ごとの作業場所で start できる"
+
+manual start 102 epic/manual-two >"$WORK/start.out" 2>&1 || { cat "$WORK/start.out" >&2; fail "同じリポジトリで 2 つ目の手動ループを start できない"; }
+D102="$WORK/repos/myapp-ralph-d102-ctl"
+[[ -d "$D102" && -d "$WORK/repos/myapp-ralph-d102-a" && -d "$WORK/repos/myapp-ralph-d102-b" ]] || fail "2 つ目の手動ループの作業場所を作っていない"
+[[ -f "$D101/.claude/askhub-manual.local.txt" ]] || fail "2 つ目の start が、1 つ目の手動ループの記録を消した"
+[[ "$(comment_count 101)" -eq 1 && "$(comment_count 102)" -eq 1 ]] || fail "手動ループごとにコメントを 1 つずつ書いていない（101: $(comment_count 101) 件、102: $(comment_count 102) 件）"
+comment_has 101 '"runner":"test","state":"waiting-to-start"' || fail "コメントに担当者と開始待ちを書いていない: $(loop_comments 101)"
+cmp -s "$WORK/issue-body.before" "$GH_STATE/issues/$ISSUE/body" || fail "手動ループが、状態用の Issue の本文を書き換えた"
+cmp -s "$WORK/evil.before" "$GH_STATE/comments/1/body" || fail "信用外の author のコメントを書き換えた"
+auto_untouched || fail "2 つ目の start が、自動ループの制御用 worktree に触った"
+ok "同じリポジトリで Discussion の違う 2 つの手動ループを start でき、それぞれのループのコメントにだけ状態を書く"
+
+if manual start 103 epic/manual-one >"$WORK/start.out" 2>&1; then fail "ほかの手動ループが使っている epic で start できた"; fi
+grep -q '別の worktree' "$WORK/start.out" || fail "epic をほかのループが使っていることを知らせていない: $(cat "$WORK/start.out")"
+[[ ! -e "$WORK/repos/myapp-ralph-d103-ctl" ]] || fail "start できなかったのに作業場所を残した"
+ok "ほかのループが使っている epic では start しない"
+
+# ループの Claude は、制御用 worktree の中から番号を付けずに status を呼ぶ
+perl -pi -e 's/\{\{[A-Z_]+\}\}/X/g' "$D101/.claude/ralph-playbook.local.md"
+printf '# ゴール\n\n- [x] 【FEAT】一つ目 | label: enhancement\n- [ ] 【FEAT】二つ目 | label: enhancement\n' > "$D101/.claude/ralph-goal.local.md"
+BEFORE_102=$(loop_comments 102)
+(cd "$D101" && GH_LOG="$WORK/gh.log" scripts/askhub-manual.sh status --stopping >/dev/null) || fail "制御用 worktree の中から status を書けない"
+[[ "$(comment_count 101)" -eq 1 ]] || fail "status がコメントを重ねて作った"
+comment_has 101 '"progress":{"completed":1,"deferred":0,"total":2}' || fail "status が Discussion 101 のコメントを書き換えていない: $(loop_comments 101)"
+[[ "$(loop_comments 102)" == "$BEFORE_102" ]] || fail "status が、ほかのループのコメントを書き換えた"
+if manual resume >"$WORK/resume.out" 2>&1; then fail "手動ループが 2 つあるのに、番号を省いた resume を受け付けた"; fi
+grep -q '#101 #102' "$WORK/resume.out" || fail "番号を付けるよう知らせていない: $(cat "$WORK/resume.out")"
+ok "制御用 worktree の中の status は自分のループのコメントだけを書き換え、番号を省いた操作はループが複数なら断る"
+
+# 番号を付けた launch。見張り役が最終 PR を作り、Discussion が閉じたら、そのループのコメントだけを消す
+: > "$WORK/gh.log"
+STUB_LOOP=promise manual launch 101 "SMOKE DONE" >/dev/null || fail "番号を付けた launch が失敗した"
+wait_watch "$(loop_log "$D101")"
+grep -q -- '^pr create .*--base develop --head epic/manual-one' "$WORK/gh.log" || fail "見張り役が Discussion 101 の最終 PR を作っていない: $(cat "$(loop_log "$D101")")"
+wait_for comment_has 101 '"state":"completed"' || fail "最終 PR を作った後に、Discussion 101 のコメントを完了にしていない"
+touch "$GH_STATE/closed-101"
+wait_watch_exit "$D101"
+[[ "$(comment_count 101)" -eq 0 ]] || fail "Discussion 101 が閉じたのに、そのループのコメントを消していない"
+[[ "$(comment_count 102)" -eq 1 ]] || fail "ほかのループのコメントを消した"
+cmp -s "$WORK/evil.before" "$GH_STATE/comments/1/body" || fail "信用外の author のコメントに触った"
+ok "番号を付けた launch の見張り役が最終 PR を作り、Discussion が閉じたら、そのループのコメントだけを消す"
+
+OUT=$(manual end 102) || fail "end が失敗した"
+[[ "$(comment_count 102)" -eq 0 ]] || fail "end がループの状態のコメントを消していない"
+grep -q '^ended_at=' "$D102/.claude/askhub-manual.local.txt" || fail "end がループを終えたことを記録していない"
+grep -q 'ralph-stop.sh" --worktrees' <<<"$OUT" || fail "end が作業場所の消し方を知らせていない"
+if manual resume >"$WORK/resume.out" 2>&1; then fail "終えたループを、番号を省いた resume で起動した"; fi
+ok "end で、Discussion を閉じずにやめたループのコメントを消す"
+
+# 見張り役が動いていなかった（Mac の再起動など）ループは、次の start が Discussion の閉じたものを片付ける
+manual start 104 epic/manual-four >/dev/null 2>&1 || fail "3 つ目の手動ループを start できない"
+[[ "$(comment_count 104)" -eq 1 ]] || fail "3 つ目の手動ループのコメントを書いていない"
+touch "$GH_STATE/closed-104"
+OUT=$(manual start 105 epic/manual-five 2>&1) || fail "4 つ目の手動ループを start できない: $OUT"
+[[ "$(comment_count 104)" -eq 0 ]] || fail "start が、Discussion の閉じたほかの手動ループのコメントを消していない"
+[[ "$(comment_count 105)" -eq 1 ]] || fail "4 つ目の手動ループのコメントを書いていない"
+auto_untouched || fail "手動ループの操作が、自動ループの制御用 worktree に触った"
+{ kill "$AUTO_PID" && wait "$AUTO_PID"; } 2>/dev/null || true
+ok "start は、Discussion の閉じたほかの手動ループのコメントを消す。手動ループの操作は自動ループの制御用 worktree に触らない"
 
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e
