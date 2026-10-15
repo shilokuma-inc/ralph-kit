@@ -18,7 +18,7 @@ bin/
   ralph-setup.sh                worktree と統合ブランチを用意する
   ralph-start.sh                state ファイルを生成する（＝ループ開始）
   ralph-stop.sh                 停止と後片付け
-  askhub-manual.sh              手動ループ（担当者の Mac で回す）の準備・起動・状態の書き出し・最終 PR
+  askhub-manual.sh              手動ループ（担当者の Mac で回す）の準備・起動・状態の書き出し・最終 PR・終了
 shim/                           各リポジトリに置くファイルの原本（install.sh が配る）
 install.sh                      リポジトリに中継を入れる・ずれを確かめる
 .github/workflows/
@@ -230,12 +230,18 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
 ラベルは `ralph-setup.sh` が作る（AskHub も「手動で回す」で投稿するときに無ければ作る）。セットアップ前で無いときは
 `gh label create manual-loop --color C5DEF5 --description 'この Discussion のループは手で回す（オーケストレーターは起動しない）'` で作る。
 
+**手動ループは、同じリポジトリでいくつでも並べて回せる**（同じ Mac で同じリポジトリの手動ループを複数回すのも含む。
+[ask-hub-apple の Discussion #425](https://github.com/shilokuma-inc/ask-hub-apple/discussions/425)）。
+作業場所は Discussion ごとに分かれ（下の「作業場所」）、ループの状態もループごとのコメントに書くので、互いに上書きしない。
+自動ループはリポジトリごとに 1 つ（オーケストレーターの制御用 worktree `<名前>-ralph-ctl`）で、手動ループはそこに触らない。
+
 `manual-loop` の付いた Discussion について、オーケストレーターは次のように動く:
 
 - 全問回答でも `ready-for-loop` を付けない（`needs-answer` だけ外す）。`ready-for-loop` が付いていても起動しない
-- Discussion が open なあいだ（最終 PR のマージで閉じられるまで）、**同じリポジトリのほかの Discussion も自動で起動しない**（1 リポジトリにつきループは 1 つ）
+- 手動ループが動いていても、同じリポジトリの自動ループを止めないのが Discussion #425 の決定。ただし、その対応が入る前のオーケストレーターは、
+  信用する author の open な `manual-loop` の Discussion があるあいだ、同じリポジトリのほかの Discussion を自動で起動しない
 - PR の ask に回答が付いても、ループを再開しない（ループは担当者の Mac にある。担当者が AskHub の知らせを見て再開する）
-- 手動ループが書いた loop-status を上書きしない（担当者の情報を残す）。最終 PR のコンフリクトの解消と、マージ後の仮決め一覧のクローズは今までどおり行う
+- 手動ループのコメント（ループの状態）を書き換えない（担当者の情報を残す）。最終 PR のコンフリクトの解消と、マージ後の仮決め一覧のクローズは今までどおり行う
 
 担当者は、AskHub のステータスタブの「手動ループ」（または担当のコメント）から指示をコピーし、**このリポジトリの checkout で開いた Claude Code に貼る**:
 
@@ -245,40 +251,74 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
 <owner/repo> の Discussion #N の手動ループの最終 PR を作って（scripts/askhub-manual.sh final）
 ```
 
-指示を受けた Claude は、**`scripts/askhub-manual.sh` で次を行う**（ラベル・状態の書き出し・最終 PR の目印を手で行わない。抜けると AskHub に正しく出ない）:
+指示を受けた Claude は、**`scripts/askhub-manual.sh` で次を行う**（ラベル・状態の書き出し・最終 PR の目印を手で行わない。抜けると AskHub に正しく出ない）。
+`start` 以外も、**Discussion の番号 `<N>` を付けて呼ぶ**（同じリポジトリのほかの手動ループと取り違えないように。
+番号を省くと、制御用 worktree・スロットの中ではそのループを、ほかの場所ではこの Mac の手動ループが 1 つだけならそれを使い、2 つ以上なら断る）:
 
-1. `scripts/askhub-manual.sh start <N> epic/<機能名>`（epic 名は Discussion の内容から決める）。
-   担当者が自分か確かめ、`ralph-setup.sh` で制御用 worktree とスロットを作り（epic は `ASKHUB_BASE_BRANCH`（既定は `develop`）から切る）、epic を origin に push してから `ready-for-loop` を外し、loop-status を「開始待ち」で書く。
-   信用する author（書き込み権限を持つ人）と、次に埋める値を表示する
-2. 制御用 worktree の playbook の `{{...}}` を埋め（`TRUSTED_AUTHORS` は start が表示した値）、STEP A に沿って goal を作る
-   （Discussion の、信用する author の本文・コメント・返信だけを使う）
-3. `scripts/askhub-manual.sh launch "<完了語>"`。制御用 worktree で `claude -p` のループをバックグラウンドで起動する
+1. `scripts/askhub-manual.sh start <N> epic/<機能名>`（epic 名は Discussion の内容から決める。同じリポジトリのほかのループが使っている epic 名は使えない）。
+   担当者が自分か確かめ、`ralph-setup.sh` でこの Discussion の制御用 worktree とスロットを作り（epic は `ASKHUB_BASE_BRANCH`（既定は `develop`）から切る）、epic を origin に push してから `ready-for-loop` を外し、ループの状態を「開始待ち」で書く。
+   信用する author（書き込み権限を持つ人）と、次に埋める値（作業場所のパスを含む）を表示する
+2. 制御用 worktree の playbook の `{{...}}` を埋め（`TRUSTED_AUTHORS`・`WORKTREE_*` は start が表示した値）、STEP A に沿って goal を作る
+   （Discussion の、信用する author の本文・コメント・返信だけを使う）。検証コマンドの `-derivedDataPath` などスロットごとの場所は、
+   スロットのパスから作る（同じリポジトリのほかのループのスロットと共有しない）
+3. `scripts/askhub-manual.sh launch <N> "<完了語>"`。制御用 worktree で `claude -p` のループをバックグラウンドで起動する
    （`launch` が、起動の前に実際に効く権限モードを自動で確かめる。`bypassPermissions` が使えればそれで起動し、
    MDM や組織の管理設定で禁止された Mac（エラーにならずにすべての操作が拒否されてループが進まない）では `auto` モードで起動する。
    どちらも使えなければ、理由を出して起動しない。担当者が手で確かめたり選んだりする必要はない）
    （指示を受けた会話そのものはループにならない。ログは `~/Library/Logs/askhub/manual/`）
    あわせて、ループの終了を待つ見張り役（シェル）を裏で起動する（下の 6）。`resume` も同じ
-4. 周回中は、playbook の STEP D が `scripts/askhub-manual.sh status` を呼び、loop-status を書き手 `manual`・回している人つきで書く（10 分に 1 回まで）。
-   promise を出す直前に `status --stopping` を呼ぶ（回答待ちの PR を書き、AskHub が回答のそろったところで担当者に再開を促す）
-   書き込む Issue はオーケストレーターと同じ選び方で決める（信用する author が作った `loop-status` の Issue のうち、open で最も新しく更新されたもの。
-   無ければ閉じたもののうち最も新しく更新されたものを開き直す。1 つも無ければ担当者のアカウントで作る）
-5. 回答がそろったら（AskHub に「回答がそろいました」が出る）、再開の指示を受けて `scripts/askhub-manual.sh resume`
-6. ループが全タスクを終えて promise を出すと、見張り役が**制御用 worktree の外（メインの checkout）で** `scripts/askhub-manual.sh final` を流し、
+4. 周回中は、playbook の STEP D が制御用 worktree の中で `scripts/askhub-manual.sh status` を呼び（番号は要らない）、ループの状態を書き手 `manual`・回している人つきで書く（10 分に 1 回まで）。
+   promise を出す直前に `status --stopping` を呼ぶ（回答待ちの PR を書き、AskHub が回答のそろったところで担当者に再開を促す）。
+   書くのは、状態用の Issue（`loop-status`）の**このループのコメント**だけ（本文はオーケストレーターがリポジトリ全体の状態に使うので書かない。
+   形式は ask-hub-apple の `docs/protocol.md` の「ループごとのコメントと本文の形」）。コメントの先頭に `<!-- ask-hub:loop-status {...} -->` の目印を置き、
+   `discussion`（ゴール元の Discussion の番号）・`writer`（`manual`）・`runner`（担当者）を必ず入れる。
+   自分のコメントは、信用する author のコメントのうち目印の `discussion` と `writer` が合うもので見つける（author では見分けない。担当者が替わっても同じコメントを書き換える）。
+   gh のアカウントが信用する author でなければ書かない（読む側は信用する author のコメントだけを読む）。
+   使う Issue はオーケストレーターと同じ選び方で決める（信用する author が作った `loop-status` の Issue のうち、open で最も新しく更新されたもの。
+   無ければ閉じたもののうち最も新しく更新されたものを開き直す。1 つも無ければ、ループの状態を書かない本文で担当者のアカウントで作る）
+5. 回答がそろったら（AskHub に「回答がそろいました」が出る）、再開の指示を受けて `scripts/askhub-manual.sh resume <N>`
+6. ループが全タスクを終えて promise を出すと、見張り役が**制御用 worktree の外（メインの checkout）で** `scripts/askhub-manual.sh final <N>` を流し、
    ゴール元の目印つきの最終 PR（`epic-final`）を作る（自動ループでオーケストレーターが作るのと同じ。担当者の指示は要らない）。
    見張り役はメインの checkout で動くシェルで、ループの Claude ではないので、ループの deny（`gh pr create --base develop`）には当たらない。
    promise を出さずに終わったとき（API のエラーなどの異常終了・`ralph-stop.sh` での停止・無進捗での停止）は作らない。
-   結果はループのログに `[askhub-manual …]` の行で残る。`ASKHUB_AUTO_FINAL=0` を付けて `launch` / `resume` すると、見張り役を起動しない。
+   結果はループのログに `[askhub-manual …]` の行で残る。`ASKHUB_AUTO_FINAL=0` を付けて `launch` / `resume` すると、最終 PR は作らない（見張り役は下の 7 のために動く）。
    見張り役が動かなかったとき（Mac の再起動・ログアウトなど）や `ASKHUB_AUTO_FINAL=0` のときは、AskHub の「手動ループ」の
-   「最終 PR の指示をコピー」から最終 PR の指示を受けて、**制御用 worktree の外で** `scripts/askhub-manual.sh final` を流す。
+   「最終 PR の指示をコピー」から最終 PR の指示を受けて、**制御用 worktree の外で** `scripts/askhub-manual.sh final <N>` を流す。
    goal に未完了のタスク（`※回答待ち` のものを除く）が残っていれば作らない。回答待ちの PR だけが残っているときは作り（自動ループと同じ）、その時点で open な回答待ちの PR を本文の「回答待ちの PR」に載せる。
    `※回答待ち` のタスクは、goal に書いた PR（`※回答待ち（PR #123 / ask id 456）`）が open な回答待ちの PR（`needs-answer`）でなければ作らない。
    マージは AskHub の「要対応」タブの「マージ待ち」から（マージするとゴール元の Discussion が閉じる）。
-   `final` を流し忘れても、loop-status が「完了」になってから 30 分たつと、オーケストレーターが GitHub 上の子 PR・仮決め一覧・実機確認から最終 PR を作る
+   `final` を流し忘れても、ループの状態が「完了」になってから 30 分たつと、オーケストレーターが GitHub 上の子 PR・仮決め一覧・実機確認から最終 PR を作る
    （手元の state の「最終 PR に載せる内容」は使えないので、内容は `final` で作るものより簡素になる）。
    `ASKHUB_BASE_BRANCH` を `develop` 以外にしたときは、Discussion を閉じるワークフロー（`close-goal-discussion.yml`）が動かないので、
-   マージした後に担当者がゴール元の Discussion を閉じる（閉じるまで、このリポジトリの自動ループは止まったまま）
+   マージした後に担当者がゴール元の Discussion を閉じる（閉じるまで、ループの状態のコメントが残る。Discussion #425 の対応が入る前のオーケストレーターは、このリポジトリの自動ループも起動しない）
+7. 見張り役は、最終 PR の後（promise を出さずに終わったときも）、ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを
+   10 分おき（`ASKHUB_CLOSE_WATCH_INTERVAL`）に確かめ、閉じたら**このループのコメントを消す**（AskHub は閉じた Discussion の手動ループを絞り込まないので、
+   消さないと終わったループの行が残り続ける）。Discussion が open なあいだは消さない（状態が無いと、AskHub の「手動ループ」が「未開始」と出す）。
+   `resume` で別のループを起動したら、前の見張り役はそちらに任せて終わる。見張り役が動いていなかったとき（Mac の再起動など）は、
+   この Mac で同じリポジトリの手動ループを次に `start` したときに、Discussion の閉じたループのコメントを消す。
+   **Discussion を閉じずにやめる**ときは、ループを止めてから `scripts/askhub-manual.sh end <N>` でコメントを消す（作業場所は消さない。消し方を表示する）
 
 ask・判断ログ（`decision-log`）・実機確認（`needs-verify`）の書き方は自動のときと同じ（AskHub の受信箱でそのまま扱える）。
+
+#### 作業場所
+
+手動ループの作業場所は Discussion ごとに分かれる（`<名前>` はメインの checkout のディレクトリ名から `-ios` を除いたもの）:
+
+| 作業場所 | パス |
+| --- | --- |
+| 制御用 worktree | `<名前>-ralph-d<N>-ctl`（記録 `.claude/askhub-manual.local.txt`・playbook・goal・state・PID） |
+| スロット | `<名前>-ralph-d<N>-a`・`<名前>-ralph-d<N>-b` |
+| ログ | `~/Library/Logs/askhub/manual/<名前>-d<N>-loop-<日時>.log` |
+
+オーケストレーターの自動ループは `<名前>-ralph-ctl`・`-a`・`-b`（`ralph-setup.sh` の既定）を使い、手動ループはそこに触らない。
+同じ epic は 1 つの worktree でしか checkout できないので、ほかのループ（自動・手動）が使っている epic 名では `start` できない。
+終わった Discussion の作業場所は自動では消さない（goal・state の記録が残るため）。要らなくなったら `end` が表示するコマンドで消す。
+
+kit 1.3 までに `<名前>-ralph-ctl` で始めた手動ループは、**移さずにその場所のまま最後まで回す**（動いているループ・記録を壊さないため）。
+`resume` / `final` / `status` は、その Discussion の新しい作業場所が無く、`<名前>-ralph-ctl` の記録がその Discussion のもので、記録の epic を今も checkout していれば、そこを使う。
+状態の書き出しは、この版で起動し直した（`resume`）ときからループのコメントに変わる（それまでは、起動したときの版の kit が本文に書く）。
+本文に残った前の形の状態は、同じ Discussion ではコメントの方が新しいので AskHub はコメントを読み、オーケストレーターが本文を書き直すと消える。
+同じ Mac でオーケストレーターと前の形の手動ループが `<名前>-ralph-ctl` を取り合う制約は、そのループが終わるまで残る。新しく `start` する Discussion は新しい作業場所を使う。
 
 ## ループに向かないタスク
 
