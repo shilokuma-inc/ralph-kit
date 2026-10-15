@@ -5,6 +5,7 @@
 #          scripts/askhub-manual.sh status [<Discussion 番号>] [--stopping]
 #          scripts/askhub-manual.sh resume [<Discussion 番号>]
 #          scripts/askhub-manual.sh final [<Discussion 番号>]
+#          scripts/askhub-manual.sh end [<Discussion 番号>]
 #
 # 作業場所は Discussion ごとに分ける。同じリポジトリの手動ループを、同じ Mac でも並べて回せる（ask-hub-apple の Discussion #425）:
 #   制御用 worktree は <名前>-ralph-d<番号>-ctl、スロットは <名前>-ralph-d<番号>-a / -b（<名前> はメインの checkout のディレクトリ名から -ios を除いたもの）。
@@ -18,14 +19,17 @@
 #   2. （Claude が playbook の {{...}} を埋め、STEP A に沿って goal を作る）
 #   3. launch: 完了語を記録し、ralph-start.sh で state を作り、制御用 worktree で claude -p のループをバックグラウンドで起動する
 #              （bypassPermissions で起動する。MDM などで禁止された Mac では auto モード。どちらも使えなければ起動しない）
-#              あわせて見張り役（watch-final）を裏で起動し、ループが完了語を出して終わったら final を流す（ASKHUB_AUTO_FINAL=0 で止める）
+#              あわせて見張り役（watch-final）を裏で起動し、ループが完了語を出して終わったら final を流す（ASKHUB_AUTO_FINAL=0 なら流さない）
 #   4. status: ループの状態を、状態用の Issue のこのループのコメントに、書き手 manual・回している人つきで書く（playbook の STEP D から呼ぶ。10 分に 1 回まで）
 #   5. resume: 回答が付いた後などに、記録した完了語でループを起動し直す（launch と同じく見張り役も起動する）
 #   6. final:  ループが終わったら、ゴール元の目印つきの最終 PR（epic-final）を作る。制御用 worktree の外から呼ぶ
 #              goal に未完了のタスクが残っていれば作らない（回答待ちの PR だけが残っているときは作る）
 #              ふだんは見張り役が呼ぶ。手で呼ぶのは、見張り役が動かなかったとき（Mac の再起動など）や ASKHUB_AUTO_FINAL=0 のとき
+#   7. 終わり: 見張り役は、ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる）のを待ち、このループのコメントを消す。
+#              見張り役が動いていなかったときは、次の start（同じリポジトリのどの Discussion でも）が消す
+#      end:    Discussion を閉じずにループをやめるときに、このループのコメントを消す
 #
-# 必要なもの: gh（このリポジトリに書き込み権限のあるアカウントでログイン済み）・git・claude（ralph-loop プラグイン入り）
+# 必要なもの: gh（このリポジトリに書き込み権限のあるアカウントでログイン済み）・git・jq・claude（ralph-loop プラグイン入り）
 set -euo pipefail
 
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
@@ -38,10 +42,10 @@ COMMAND="${1:-}"
 [[ $# -gt 0 ]] && shift
 
 fail() { echo "error: $*" >&2; exit 1; }
-usage() { sed -n '3,7p' "$0" | sed 's/^# //' >&2; exit 64; }
+usage() { sed -n '3,8p' "$0" | sed 's/^# //' >&2; exit 64; }
 
 [[ -n "$COMMAND" ]] || usage
-for command in gh git; do
+for command in gh git jq; do
   command -v "$command" >/dev/null 2>&1 || fail "$command が見つかりません"
 done
 
@@ -101,11 +105,11 @@ ctl_for() {
   printf '%s\n' "$ctl"
 }
 
-# この Mac にある、このリポジトリの手動ループ（「番号<TAB>制御用 worktree」）
+# この Mac にある、このリポジトリの手動ループ（「番号<TAB>制御用 worktree」）。終えたもの（end・Discussion が閉じた）は除く
 manual_loops() {
   local record ctl n
   for record in "$PARENT/$STEM-ralph-d"*"-ctl/$RECORD" "$LEGACY_CTL/$RECORD"; do
-    [[ -f "$record" ]] || continue
+    [[ -f "$record" && -z "$(record_get "$record" ended_at)" ]] || continue
     ctl="${record%"/$RECORD"}"
     n=$(record_get "$record" discussion)
     [[ "$n" =~ ^[0-9]+$ && "$(ctl_for "$n")" == "$ctl" ]] || continue
@@ -167,6 +171,11 @@ state_set() {
   local rest
   rest=$(grep -v "^$1=" "$STATE_FILE" || true)
   { [[ -n "$rest" ]] && printf '%s\n' "$rest"; printf '%s=%s\n' "$1" "$2"; } > "$STATE_FILE.tmp"
+  mv "$STATE_FILE.tmp" "$STATE_FILE"
+}
+state_unset() {
+  [[ -f "$STATE_FILE" ]] || return 0
+  grep -v "^$1=" "$STATE_FILE" > "$STATE_FILE.tmp" || true
   mv "$STATE_FILE.tmp" "$STATE_FILE"
 }
 
@@ -387,6 +396,61 @@ publish_status_comment() {
   done
 }
 
+# ---- ループの終わり（このループのコメントを消す）----------------------------------------------
+# AskHub は閉じた Discussion の手動ループを絞り込まないので、消さないと終わったループの行が残り続ける。
+# Discussion が open なあいだは消さない（AskHub の「手動ループ」は、状態が無いと「未開始」と出して開始の指示を出す）
+
+# Discussion が閉じているか（true / false。見つからなければ null）
+discussion_closed() {
+  gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ discussion(number:$n){ closed } } }' \
+    -f o="$OWNER" -f r="$REPO" -F n="$1" --jq '.data.repository.discussion.closed'
+}
+
+# 信用する author が作った状態用の Issue（閉じたものも）から、このループのコメントをすべて消す
+delete_status_comments() {
+  local trusted candidates issue ids id
+  if ! trusted=$(trusted_authors) || [[ -z "$trusted" ]]; then
+    warn "信用する author を取得できないため、ループの状態のコメントを消せません（gh auth status を確認してください）"
+    return 1
+  fi
+  if ! candidates=$(status_issue_candidates "$trusted"); then
+    warn "状態用の Issue を取得できないため、ループの状態のコメントを消せません"
+    return 1
+  fi
+  for issue in $(cut -f 3 <<<"$candidates"); do
+    if ! ids=$(own_status_comments "$issue" "$trusted"); then
+      warn "状態用の Issue（#${issue}）のコメントを取得できないため、ループの状態のコメントを消せません"
+      return 1
+    fi
+    for id in $(cut -f 2 <<<"$ids"); do
+      gh api -X DELETE "repos/$REPOSITORY/issues/comments/$id" >/dev/null \
+        || { warn "ループの状態のコメント（${id}）を消せませんでした"; return 1; }
+    done
+  done
+}
+
+# このループを終える（コメントを消し、終えたことを記録する。記録した手動ループは、番号を省いたときの候補から外す）
+end_loop() {
+  delete_status_comments || return 1
+  state_set ended_at "$(iso_now)"
+}
+
+# この Mac のほかの手動ループのうち、ゴール元の Discussion が閉じたもののコメントを消す
+# （見張り役が、Discussion が閉じるのを待てなかったとき（Mac の再起動など）の後片付け）
+sweep_finished_loops() {
+  local n ctl
+  while IFS=$'\t' read -r n ctl; do
+    [[ -n "$n" && "$n" != "$LOOP_DISCUSSION" ]] || continue
+    [[ "$(discussion_closed "$n" </dev/null 2>/dev/null || true)" == true ]] || continue
+    # 使うループの変数（記録・state の場所）を変えないよう、サブシェルで扱う
+    (
+      use_loop "$n" "$ctl"
+      if loop_alive; then exit 0; fi
+      end_loop >/dev/null && echo "Discussion #$n の手動ループは終わっている（Discussion が閉じている）ので、ループの状態のコメントを消しました"
+    ) </dev/null || true
+  done < <(manual_loops)
+}
+
 # ---- ループの起動 --------------------------------------------------------------------------
 
 # claude を指定の権限モードで起動したとき、実際に効く権限モード（起動時の init イベントから読む）。
@@ -496,6 +560,8 @@ launch_loop() {
   )
   state_set log "$log"
   state_set permission_mode "$permission_mode"
+  # end で終えたループを起動し直したら、終えた記録を外す（見張り役が、Discussion が閉じたらまたコメントを消せるように）
+  state_unset ended_at
   echo "ループを起動しました（PID $(cat "$PID_FILE")、権限モード: ${permission_mode}、ログ: ${log}）"
   echo "進み具合を見るには: tail -f \"$log\""
   start_final_watch "$(tr -d '[:space:]' < "$PID_FILE")" "$log"
@@ -504,13 +570,9 @@ launch_loop() {
 
 # ループが終わったら最終 PR を作る見張り役を、裏で起動する（自動ループでオーケストレーターが作るのと同じく、担当者に final を頼ませない）。
 # 見張り役はメインの checkout で動くシェルで、ループの Claude ではないので、ループの deny（gh pr create --base develop）には当たらない。
-# ASKHUB_AUTO_FINAL=0 なら起動しない（担当者が final を流す）
+# ASKHUB_AUTO_FINAL=0 なら最終 PR は作らない（担当者が final を流す）。そのときも、Discussion が閉じたらコメントを消すために起動する
 start_final_watch() {
   local pid="$1" log="$2" watch_pid
-  if [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
-    echo "ASKHUB_AUTO_FINAL=0 のため、最終 PR は自動では作りません（ループが終わったら scripts/askhub-manual.sh final $LOOP_DISCUSSION）"
-    return 0
-  fi
   watch_pid=$(
     cd "$MAIN"
     RALPH_KIT_DIR="$KIT_DIR" nohup "$KIT_DIR/bin/askhub-manual.sh" watch-final "$LOOP_DISCUSSION" "$pid" "$log" </dev/null >>"$log" 2>&1 &
@@ -518,11 +580,35 @@ start_final_watch() {
   )
   # 見張り役が動いているかを外から確かめられるように残す（見張り役は final の後も状態の書き出しで記録ファイルを書く）
   state_set watch_pid "$watch_pid"
-  echo "ループが完了語を出して終わったら、最終 PR を自動で作ります（作れなかったときは scripts/askhub-manual.sh final $LOOP_DISCUSSION）"
+  if [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
+    echo "ASKHUB_AUTO_FINAL=0 のため、最終 PR は自動では作りません（ループが終わったら scripts/askhub-manual.sh final $LOOP_DISCUSSION）"
+  else
+    echo "ループが完了語を出して終わったら、最終 PR を自動で作ります（作れなかったときは scripts/askhub-manual.sh final $LOOP_DISCUSSION）"
+  fi
 }
 
 # 見張り役がループのログに書く 1 行
 watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# 見張り役: ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを待ち、このループを終える。
+# resume などで別のループが起動した・end で終えた・記録が消えたら、何もせずに終わる（そちらに任せる）
+watch_until_closed() {
+  local noted=false
+  while :; do
+    sleep "${ASKHUB_CLOSE_WATCH_INTERVAL:-600}"
+    [[ "$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || true)" == "$WATCHED" && -f "$STATE_FILE" && -z "$(state_get ended_at)" ]] || return 0
+    [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" == true ]] || continue
+    if end_loop >/dev/null; then
+      watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じたので、ループの状態のコメントを消しました"
+      return 0
+    fi
+    # 消せなければ次の確認でやり直す（ログには 1 回だけ書く）
+    if [[ "$noted" != true ]]; then
+      watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じましたが、ループの状態のコメントを消せませんでした（やり直します。止めるなら scripts/askhub-manual.sh end $LOOP_DISCUSSION）"
+      noted=true
+    fi
+  done
+}
 
 # ---- サブコマンド --------------------------------------------------------------------------
 
@@ -578,6 +664,7 @@ case "$COMMAND" in
     state_set base_branch "$BASE_BRANCH"
     state_set runner "$ME"
     write_status false true
+    sweep_finished_loops
     cat <<NEXT
 手動ループの準備ができました（$REPOSITORY / Discussion #$DISCUSSION / $EPIC / 担当 @${ME}）。
 制御用 worktree: $CTL
@@ -642,7 +729,8 @@ NEXT
 
   watch-final)
     # launch / resume が裏で起動する見張り役（担当者は呼ばない）。ループのプロセスが終わるのを待ち、
-    # ループが完了語の promise を出して終わったときだけ final を流す（自動ループと同じく、異常終了したものには作らない）
+    # ループが完了語の promise を出して終わったときだけ final を流す（自動ループと同じく、異常終了したものには作らない）。
+    # そのあと、ゴール元の Discussion が閉じるのを待って、このループのコメントを消す（promise を出さずに終わったときも。Discussion を閉じてやめたときに残さない）
     [[ "${1:-}" =~ ^[0-9]+$ && "${2:-}" =~ ^[0-9]+$ && -n "${3:-}" ]] || usage
     resolve_loop "$1"
     WATCHED="$2"
@@ -658,14 +746,32 @@ NEXT
     # Stop hook は promise を受けると state ファイルを消す。残っていれば promise を出さずに終わった（API のエラーなどの異常終了）。
     # ralph-stop.sh で止めたとき・無進捗で止まったときも state ファイルは消えるので、claude -p の最後の出力（ログ）の promise でも確かめる
     PROMISE=$(state_get promise)
-    if [[ -f "$LOOP_STATE" || -z "$PROMISE" ]] || ! grep -Fq "<promise>$PROMISE</promise>" "$WATCHED_LOG" 2>/dev/null; then
+    if [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
+      : # 最終 PR は担当者が final で作る
+    elif [[ -f "$LOOP_STATE" || -z "$PROMISE" ]] || ! grep -Fq "<promise>$PROMISE</promise>" "$WATCHED_LOG" 2>/dev/null; then
       watch_note "ループが完了語を出さずに終わったため、最終 PR は作りません（続けるなら scripts/askhub-manual.sh resume $LOOP_DISCUSSION）"
-      exit 0
+    else
+      watch_note "ループが完了語を出して終わったので、最終 PR を作ります"
+      if ! (cd "$MAIN" && "$KIT_DIR/bin/askhub-manual.sh" final "$LOOP_DISCUSSION"); then
+        watch_note "最終 PR を作れませんでした（上のエラーを確かめて、scripts/askhub-manual.sh final $LOOP_DISCUSSION を手で流してください）"
+      fi
     fi
-    watch_note "ループが完了語を出して終わったので、最終 PR を作ります"
-    if ! (cd "$MAIN" && "$KIT_DIR/bin/askhub-manual.sh" final "$LOOP_DISCUSSION"); then
-      watch_note "最終 PR を作れませんでした（上のエラーを確かめて、scripts/askhub-manual.sh final $LOOP_DISCUSSION を手で流してください）"
-      exit 1
+    watch_until_closed
+    ;;
+
+  end)
+    # Discussion を閉じずにループをやめるとき（見張り役が動いていないときの後片付けにも使える）
+    [[ -z "${1:-}" || "$1" =~ ^[0-9]+$ ]] || usage
+    resolve_loop "${1:-}"
+    loop_alive && fail "Discussion #$LOOP_DISCUSSION のループがまだ動いています（PID $(cat "$PID_FILE")）。止めてから実行してください（止めるには、$CTL で scripts/ralph-stop.sh）"
+    end_loop || fail "ループの状態のコメントを消せませんでした。もう一度 scripts/askhub-manual.sh end $LOOP_DISCUSSION を実行してください"
+    echo "Discussion #$LOOP_DISCUSSION の手動ループを終えました（ループの状態のコメントを消しました）"
+    if [[ "$CTL" != "$LEGACY_CTL" ]]; then
+      cat <<NEXT
+作業場所は残しています（goal・state の記録があるため）。要らなければ、次で消してください:
+  (cd "$CTL" && "$KIT_DIR/bin/ralph-stop.sh" --worktrees)   # スロット（${CTL%-ctl}-a / -b）
+  git -C "$MAIN" worktree remove "$CTL"                        # 制御用 worktree
+NEXT
     fi
     ;;
 
