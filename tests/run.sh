@@ -591,6 +591,14 @@ grep -q '終えているため' "$WORK/status.out" || fail "終えたループ�
 [[ "$(comment_count 105)" -eq 0 ]] || fail "end で終えたループの status が、コメントを作り直した"
 ok "end で終えたループは、status でコメントを作り直さない"
 
+# コメントを消すときは、別の状態用の Issue の本文に残った、このループの前の形の状態も片付ける（この版でコメントを書かずに end したときなど）
+add_issue 60 '<!-- ask-hub:loop-status {"checkedAt":"2026-10-01T00:00:00Z","discussion":105,"epic":"epic/manual-five","runner":"test","state":"running","writer":"manual"} -->
+## ループの状態'
+manual end 105 >/dev/null || fail "2 回目の end が失敗した"
+grep -q 'ask-hub:loop-status' "$GH_STATE/issues/60/body" && fail "end が、別の Issue の本文に残ったこのループの前の形の状態を片付けていない"
+cmp -s "$WORK/issue-body.before" "$GH_STATE/issues/$ISSUE/body" || fail "end が、オーケストレーターの書いた本文を書き換えた"
+ok "コメントを消すときは、別の Issue の本文に残った前の形の状態も片付け、オーケストレーターの本文には触らない"
+
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e
 (cd "$APP" && scripts/askhub-manual.sh >/dev/null 2>&1)
