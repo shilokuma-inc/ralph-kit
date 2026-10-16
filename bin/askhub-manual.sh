@@ -215,7 +215,8 @@ remove_ready_label() {
 # playbook の「信用する author」を今の値に書き直す（epic の途中で招待した人も、次の起動から信用する）
 refresh_trusted_authors() {
   local trusted="$1" current
-  [[ -f "$PLAYBOOK" ]] || return 0
+  # 取得できなかった（空）ときは書き換えない（信用する author が空になると、ループがどの指示も読まなくなる）
+  [[ -n "$trusted" && -f "$PLAYBOOK" ]] || return 0
   current=$(sed -n -E 's/.*\*\*信用する author: `([^`]*)`\*\*.*/\1/p' "$PLAYBOOK" | head -n 1)
   [[ -n "$current" && "$current" != "$trusted" ]] || return 0
   OLD="$current" NEW="$trusted" perl -pi -e 's/\Q`$ENV{OLD}`\E/`$ENV{NEW}`/g' "$PLAYBOOK"
@@ -273,7 +274,11 @@ write_status() {
     echo "Discussion #$discussion の手動ループは終えているため、ループの状態は書きません（続けるなら scripts/askhub-manual.sh resume $discussion）"
     return 0
   fi
-  waiting=$(gh pr list -R "$REPOSITORY" --base "$epic" --label needs-answer --state open --limit 1000 --json number --jq '.[].number' | sort -n | paste -sd, -)
+  # 取得できないときも、ほかの書き出しの失敗と同じく警告だけ出して成功で返す（launch がループを起動した後に失敗で終わらないように）
+  if ! waiting=$(gh pr list -R "$REPOSITORY" --base "$epic" --label needs-answer --state open --limit 1000 --json number --jq '.[].number' | sort -n | paste -sd, -); then
+    warn "回答待ちの PR を取得できないため、ループの状態を書きません（次の呼び出しで書き直します）"
+    return 0
+  fi
   state=$(compute_state "$stopping" "$waiting")
   total=$(count_lines '^- \[[ x]\]' "$GOAL")
   completed=$(count_lines '^- \[x\]' "$GOAL")
