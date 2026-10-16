@@ -266,6 +266,11 @@ write_status() {
   epic=$(state_get epic)
   runner=$(state_get runner)
   [[ -n "$discussion" && -n "$epic" && -n "$runner" ]] || fail "手動ループの記録がありません（先に start を実行してください）"
+  # end で終えた（コメントを消した）ループは書き直さない。書くと、片付ける役（見張り役・次の start）がいないコメントが残る
+  if [[ -n "$(state_get ended_at)" ]]; then
+    echo "Discussion #$discussion の手動ループは終えているため、ループの状態は書きません（続けるなら scripts/askhub-manual.sh resume $discussion）"
+    return 0
+  fi
   waiting=$(gh pr list -R "$REPOSITORY" --base "$epic" --label needs-answer --state open --limit 1000 --json number --jq '.[].number' | sort -n | paste -sd, -)
   state=$(compute_state "$stopping" "$waiting")
   total=$(count_lines '^- \[[ x]\]' "$GOAL")
@@ -610,14 +615,19 @@ start_final_watch() {
 watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 # 見張り役: ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを待ち、このループを終える。
-# resume などで別のループが起動した・end で終えた・記録が消えたら、何もせずに終わる（そちらに任せる）
+# resume などで別のループが起動した・end で終えたら、何もせずに終わる（そちらに任せる）。
+# 記録・PID のファイルが消えても（作業場所を先に消したなど）待ち続ける（コメントを消すのに記録は要らない。終えると、次の start も見つけられない）
 watch_until_closed() {
-  local noted=false
+  local noted=false pid
   while :; do
     sleep "${ASKHUB_CLOSE_WATCH_INTERVAL:-600}"
-    [[ "$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || true)" == "$WATCHED" && -f "$STATE_FILE" && -z "$(state_get ended_at)" ]] || return 0
+    pid=$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || true)
+    if [[ -n "$pid" && "$pid" != "$WATCHED" ]] || [[ -n "$(state_get ended_at)" ]]; then
+      return 0
+    fi
     [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" == true ]] || continue
-    if end_loop >/dev/null; then
+    # 記録が無ければ作り直さない（消した作業場所のディレクトリを作ってしまう）
+    if { [[ -f "$STATE_FILE" ]] && end_loop >/dev/null; } || { [[ ! -f "$STATE_FILE" ]] && delete_status_comments; }; then
       watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じたので、ループの状態のコメントを消しました"
       return 0
     fi
@@ -762,6 +772,11 @@ NEXT
       watch_note "別のループが起動しているため、最終 PR はそのループが終わってから作ります"
       exit 0
     fi
+    # 見張っている間に end で終えていたら、最終 PR は作らない（担当者がやめると決めたループ）
+    if [[ -n "$(state_get ended_at)" ]]; then
+      watch_note "end で終えたため、最終 PR は作りません"
+      exit 0
+    fi
     # Stop hook は promise を受けると state ファイルを消す。残っていれば promise を出さずに終わった（API のエラーなどの異常終了）。
     # ralph-stop.sh で止めたとき・無進捗で止まったときも state ファイルは消えるので、claude -p の最後の出力（ログ）の promise でも確かめる
     PROMISE=$(state_get promise)
@@ -785,6 +800,10 @@ NEXT
     loop_alive && fail "Discussion #$LOOP_DISCUSSION のループがまだ動いています（PID $(cat "$PID_FILE")）。止めてから実行してください（止めるには、$CTL で scripts/ralph-stop.sh）"
     end_loop || fail "ループの状態のコメントを消せませんでした。もう一度 scripts/askhub-manual.sh end $LOOP_DISCUSSION を実行してください"
     echo "Discussion #$LOOP_DISCUSSION の手動ループを終えました（ループの状態のコメントを消しました）"
+    # Discussion が open で manual-loop が付いたままだと、AskHub の「手動ループ」は状態の無いこのループを「未開始」と出し、開始の指示を出す
+    if [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" != true ]]; then
+      echo "Discussion #$LOOP_DISCUSSION は open のままです。やめるなら Discussion を閉じてください（AskHub の「手動ループ」には、閉じるまで「未開始」と出ます）"
+    fi
     if [[ "$CTL" != "$LEGACY_CTL" ]]; then
       cat <<NEXT
 作業場所は残しています（goal・state の記録があるため）。要らなければ、次で消してください:
