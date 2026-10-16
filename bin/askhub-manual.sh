@@ -642,6 +642,8 @@ watch_until_closed() {
   local noted=false pid ours
   while :; do
     sleep "${ASKHUB_CLOSE_WATCH_INTERVAL:-600}"
+    # リポジトリの checkout ごと消されたら（担当から外したなど）、待つ相手がいないので終わる
+    [[ -d "$COMMON_DIR" ]] || return 0
     ours=false
     [[ "$(state_get discussion)" == "$LOOP_DISCUSSION" ]] && ours=true
     # < の失敗の知らせも捨てる（記録が消えた後に、10 分ごとにログへ書かないように）
