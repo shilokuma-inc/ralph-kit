@@ -360,19 +360,23 @@ AskHub のループの状態を書き出す Issue です。ループの状態は
 
 # kit 1.3 までの手動ループが本文に書いた、このループの状態（前の形の目印。書き手 manual で、このループの Discussion のもの）を片付ける。
 # 残すと、このループのコメントを消した後に AskHub が本文から終わったループの行を出し、手動ループの Discussion が open なあいだは
-# オーケストレーターも本文を書き直さない。片付けるのはこのループの状態だけ（オーケストレーター・ほかのループが書いた本文には触らない）
+# オーケストレーターも本文を書き直さない。片付けるのはこのループの状態だけ（オーケストレーター・ほかのループが書いた本文には触らない）。
+# 本文を読めなかった・書き換えられなかったときは、警告を出して 1 を返す（やり直すかは呼び出し側が決める）
 clear_legacy_body() {
   local legacy
-  legacy=$(gh issue view "$1" -R "$REPOSITORY" --json body --jq '.body' \
+  if ! legacy=$(gh issue view "$1" -R "$REPOSITORY" --json body --jq '.body' \
     | jq -R -s -r --argjson discussion "$LOOP_DISCUSSION" '
         sub("^\\s+"; "") | capture("^<!--\\s*ask-hub:loop-status\\s(?<json>[^\\n]*?)-->") | .json | fromjson?
-        | select(type == "object" and .writer == "manual" and .discussion == $discussion) | "legacy"') || return 0
-  [[ "$legacy" == legacy ]] || return 0
-  if gh issue edit "$1" -R "$REPOSITORY" --body "$STATUS_ISSUE_BODY" >/dev/null; then
-    echo "状態用の Issue（#$1）の本文に残っていた、このループの前の形の状態を片付けました"
-  else
-    warn "状態用の Issue（#$1）の本文に残っている、このループの前の形の状態を片付けられませんでした（次の書き出しでやり直します）"
+        | select(type == "object" and .writer == "manual" and .discussion == $discussion) | "legacy"'); then
+    warn "状態用の Issue（#$1）の本文を読めないため、このループの前の形の状態が残っているかを確かめられません"
+    return 1
   fi
+  [[ "$legacy" == legacy ]] || return 0
+  if ! gh issue edit "$1" -R "$REPOSITORY" --body "$STATUS_ISSUE_BODY" >/dev/null; then
+    warn "状態用の Issue（#$1）の本文に残っている、このループの前の形の状態を片付けられませんでした"
+    return 1
+  fi
+  echo "状態用の Issue（#$1）の本文に残っていた、このループの前の形の状態を片付けました"
 }
 
 # このループのコメントを書く（無ければ作る）。書けなかったときは警告を出して 1 を返す
@@ -408,7 +412,8 @@ publish_status_comment() {
       gh issue reopen "$issue" -R "$REPOSITORY" >/dev/null 2>&1 || true
     fi
   fi
-  clear_legacy_body "$issue"
+  # 片付けられなくても、コメントは書く（次の書き出しでやり直す）
+  clear_legacy_body "$issue" || true
   if ! comments=$(own_status_comments "$issue" "$trusted"); then
     warn "状態用の Issue（#${issue}）のコメントを取得できないため、ループの状態を書きません"
     return 1
@@ -449,16 +454,18 @@ delete_status_comments() {
     return 1
   fi
   for issue in $(cut -f 3 <<<"$candidates"); do
-    # kit 1.3 までがこのループの状態を本文に書いたまま（この版でコメントを書かずに終えた・別の Issue の本文に残っている）なら、それも片付ける
-    clear_legacy_body "$issue"
+    # kit 1.3 までがこのループの状態を本文に書いたまま（この版でコメントを書かずに終えた・別の Issue の本文に残っている）なら、それも片付ける。
+    # 片付けられなければ失敗にする（終えた記録を書くと、その後は書き出しも start の片付けもこのループを見ないので、やり直せなくなる）
+    clear_legacy_body "$issue" || return 1
     if ! ids=$(own_status_comments "$issue" "$trusted"); then
       warn "状態用の Issue（#${issue}）のコメントを取得できないため、ループの状態のコメントを消せません"
       return 1
     fi
     for id in $(cut -f 2 <<<"$ids"); do
-      # 見張り役と start がほぼ同時に消したもの（404）は、もう消えているので成功として扱う
+      # 見張り役と start がほぼ同時に消したもの（gh の「Not Found (HTTP 404)」）は、もう消えているので成功として扱う。
+      # 「404」だけで見ると、通信のエラーの URL に入ったコメントの id（404 を含む番号）を取り違える
       if ! error=$(gh api -X DELETE "repos/$REPOSITORY/issues/comments/$id" 2>&1 >/dev/null) \
-        && [[ "$error" != *"Not Found"* && "$error" != *"404"* ]]; then
+        && [[ "$error" != *"(HTTP 404)"* ]]; then
         warn "ループの状態のコメント（${id}）を消せませんでした: $error"
         return 1
       fi
@@ -629,24 +636,32 @@ watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 # 見張り役: ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを待ち、このループを終える。
 # resume などで別のループが起動した・end で終えたら、何もせずに終わる（そちらに任せる）。
-# 記録・PID のファイルが消えても（作業場所を先に消したなど）待ち続ける（コメントを消すのに記録は要らない。終えると、次の start も見つけられない）
+# 記録・PID のファイルが消えても（作業場所を先に消したなど）待ち続ける（コメントを消すのに記録は要らない。終えると、次の start も見つけられない）。
+# 引き継ぐのは、このループの記録が残っているときだけ（固定パスの作業場所をオーケストレーターが作り直して、自分の PID を書いたときに終わらない）
 watch_until_closed() {
-  local noted=false pid
+  local noted=false pid ours
   while :; do
     sleep "${ASKHUB_CLOSE_WATCH_INTERVAL:-600}"
-    pid=$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || true)
-    if [[ -n "$pid" && "$pid" != "$WATCHED" ]] || [[ -n "$(state_get ended_at)" ]]; then
+    ours=false
+    [[ "$(state_get discussion)" == "$LOOP_DISCUSSION" ]] && ours=true
+    # < の失敗の知らせも捨てる（記録が消えた後に、10 分ごとにログへ書かないように）
+    pid=$({ tr -d '[:space:]' < "$PID_FILE"; } 2>/dev/null || true)
+    if [[ "$ours" == true ]] && { [[ -n "$pid" && "$pid" != "$WATCHED" ]] || [[ -n "$(state_get ended_at)" ]]; }; then
       return 0
     fi
     [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" == true ]] || continue
-    # 記録が無ければ作り直さない（消した作業場所のディレクトリを作ってしまう）
-    if { [[ -f "$STATE_FILE" ]] && end_loop >/dev/null; } || { [[ ! -f "$STATE_FILE" ]] && delete_status_comments; }; then
+    # このループの記録が無ければ、記録を作り直さずにコメントだけを消す（消した作業場所のディレクトリや、ほかのループの記録に書かない）
+    if { [[ "$ours" == true ]] && end_loop >/dev/null; } || { [[ "$ours" != true ]] && delete_status_comments >/dev/null; }; then
       watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じたので、ループの状態のコメントを消しました"
       return 0
     fi
     # 消せなければ次の確認でやり直す（ログには 1 回だけ書く）
     if [[ "$noted" != true ]]; then
-      watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じましたが、ループの状態のコメントを消せませんでした（やり直します。止めるなら scripts/askhub-manual.sh end ${LOOP_DISCUSSION}）"
+      if [[ "$ours" == true ]]; then
+        watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じましたが、ループの状態のコメントを消せませんでした（やり直します。止めるなら scripts/askhub-manual.sh end ${LOOP_DISCUSSION}）"
+      else
+        watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じましたが、ループの状態のコメントを消せませんでした（やり直します）"
+      fi
       noted=true
     fi
   done
@@ -785,7 +800,7 @@ NEXT
       sleep "${ASKHUB_FINAL_WATCH_INTERVAL:-30}"
     done
     # 見張っている間に resume などで別のループが起動していたら、そのループの見張り役に任せる
-    if [[ "$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || true)" != "$WATCHED" ]]; then
+    if [[ "$({ tr -d '[:space:]' < "$PID_FILE"; } 2>/dev/null || true)" != "$WATCHED" ]]; then
       watch_note "別のループが起動しているため、最終 PR はそのループが終わってから作ります"
       exit 0
     fi
