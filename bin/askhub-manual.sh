@@ -136,6 +136,8 @@ loop_from_cwd() {
 # start 以外で使うループを決める。番号を省いたら、呼ばれた場所か、この Mac の手動ループが 1 つだけのときはそれを使う
 resolve_loop() {
   local n="${1:-}" loops count
+  # 先頭の 0 は外す（作業場所の名前と、目印の JSON の数値をそろえる）
+  if [[ -n "$n" ]]; then n=$((10#$n)); fi
   [[ -n "$n" ]] || n=$(loop_from_cwd)
   if [[ -z "$n" ]]; then
     loops=$(manual_loops)
@@ -432,7 +434,7 @@ discussion_closed() {
 
 # 信用する author が作った状態用の Issue（閉じたものも）から、このループのコメントをすべて消す
 delete_status_comments() {
-  local trusted candidates issue ids id
+  local trusted candidates issue ids id error
   if ! trusted=$(trusted_authors) || [[ -z "$trusted" ]]; then
     warn "信用する author を取得できないため、ループの状態のコメントを消せません（gh auth status を確認してください）"
     return 1
@@ -447,8 +449,12 @@ delete_status_comments() {
       return 1
     fi
     for id in $(cut -f 2 <<<"$ids"); do
-      gh api -X DELETE "repos/$REPOSITORY/issues/comments/$id" >/dev/null \
-        || { warn "ループの状態のコメント（${id}）を消せませんでした"; return 1; }
+      # 見張り役と start がほぼ同時に消したもの（404）は、もう消えているので成功として扱う
+      if ! error=$(gh api -X DELETE "repos/$REPOSITORY/issues/comments/$id" 2>&1 >/dev/null) \
+        && [[ "$error" != *"Not Found"* && "$error" != *"404"* ]]; then
+        warn "ループの状態のコメント（${id}）を消せませんでした: $error"
+        return 1
+      fi
     done
   done
 }
@@ -646,6 +652,8 @@ case "$COMMAND" in
     DISCUSSION="${1:-}"
     EPIC="${2:-}"
     [[ "$DISCUSSION" =~ ^[0-9]+$ ]] || usage
+    # 先頭の 0 は外す（作業場所の名前と、目印の JSON の数値をそろえる）
+    DISCUSSION=$((10#$DISCUSSION))
     [[ "$EPIC" =~ ^epic/[a-z0-9][a-z0-9-]*$ ]] || fail "epic のブランチ名は epic/<英小文字・数字・ハイフン> にしてください: $EPIC"
     ME=$(viewer)
     TRUSTED=$(trusted_authors)
@@ -720,6 +728,8 @@ NEXT
     else
       DISCUSSION=""
       PROMISE="${1:-}"
+      # 番号だけを付けて完了語を忘れたとき、番号を完了語にして起動しない
+      [[ ! "$PROMISE" =~ ^[0-9]+$ ]] || fail "完了語を指定してください（scripts/askhub-manual.sh launch <Discussion 番号> <完了語>）"
     fi
     [[ -n "$PROMISE" ]] || usage
     resolve_loop "$DISCUSSION"
