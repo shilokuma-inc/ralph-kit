@@ -16,6 +16,19 @@ PASSED=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok: $*"; PASSED=$((PASSED + 1)); }
 
+# 担当者の Mac と同じく UTF-8 のロケールで流す（bash 3.2 は UTF-8 のロケールで、$VAR の直後の全角文字を変数名の一部と読む）
+for locale in ja_JP.UTF-8 en_US.UTF-8 C.UTF-8 C.utf8; do
+  if locale -a 2>/dev/null | grep -qix -- "$locale"; then
+    export LC_ALL="$locale"
+    break
+  fi
+done
+# 変数の直後に全角文字を続けない（${VAR}（ のように囲む）。ロケールによっては流しても気づけないので、字面でも確かめる
+if LC_ALL=C grep -n -E '\$[A-Za-z_][A-Za-z0-9_]*[^ -~[:space:]]' "$KIT"/bin/*.sh "$KIT"/install.sh "$KIT"/shim/scripts/*.sh "$KIT"/tests/run.sh; then
+  fail "変数の直後に全角文字が続いています（\${VAR} のように波かっこで囲む）"
+fi
+ok "変数の直後に全角文字を続けていない"
+
 # ---- 環境: 偽の gh・HOME・kit の取得元 ---------------------------------------------------
 mkdir -p "$WORK/bin" "$WORK/home/.claude"
 cat > "$WORK/bin/gh" <<'GH'
