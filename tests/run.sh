@@ -9,8 +9,8 @@ set -euo pipefail
 KIT=$(cd "$(dirname "$0")/.." && pwd -P)
 # macOS の一時ディレクトリはシンボリックリンク（/var → /private/var）なので、実体のパスにしておく（中継が返すパスと比べるため）
 WORK=$(cd "$(mktemp -d)" && pwd -P)
-# 自動ループの代わりに動かすプロセス（後半のテスト）も止める
-trap 'kill "${AUTO_PID:-}" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+# 自動ループの代わりに動かすプロセス（後半のテスト）と、Discussion が閉じるのを待ったままの見張り役（引数に WORK のパスが入る）も止める
+trap 'kill "${AUTO_PID:-}" 2>/dev/null || true; pkill -f -- "$WORK/" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 PASSED=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -472,7 +472,9 @@ until ! kill -0 "$(cat "$CTL/.claude/askhub-loop.pid")" 2>/dev/null; do sleep 0.
 ok "promise を出さずに終わったときと ASKHUB_AUTO_FINAL=0 のときは、最終 PR を作らない"
 
 # ---- 手動ループを Discussion ごとの作業場所で並べる ---------------------------------------------------
-# 制御用 worktree（myapp-ralph-ctl）を、オーケストレーターの自動ループが使っている状態にする（固定パスの手動ループの記録は外す）
+# 制御用 worktree（myapp-ralph-ctl）を、オーケストレーターの自動ループが使っている状態にする（固定パスの手動ループの記録は外す）。
+# 固定パスのループの見張り役は、Discussion 1 が閉じるのを待っているので、先に止める（記録を外すと、ほかのループの場所とみなして待ち続ける）
+kill "$(sed -n 's/^watch_pid=//p' "$CTL/.claude/askhub-manual.local.txt" | tail -n 1)" 2>/dev/null || true
 rm -f "$CTL/.claude/askhub-manual.local.txt"
 printf '# ゴール\n\n- [ ] 【FEAT】自動ループのタスク | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
 (cd "$CTL" && ../myapp-ios/scripts/ralph-start.sh "AUTO DONE" >/dev/null) || fail "自動ループの state を作れない"
@@ -614,6 +616,10 @@ rm -f "$D106/.claude/askhub-manual.local.txt"
 echo "$$" > "$D106/.claude/askhub-loop.pid"
 sleep 3
 kill -0 "$WATCH_106" 2>/dev/null || fail "記録が消えて別の PID が書かれただけで、見張り役が終わった"
+# PID のファイルも消えても待ち続け、読めないことをログに書かない
+rm -f "$D106/.claude/askhub-loop.pid"
+sleep 3
+kill -0 "$WATCH_106" 2>/dev/null || fail "PID のファイルが消えただけで、見張り役が終わった"
 touch "$GH_STATE/closed-106"
 wait_for eval '! kill -0 "$WATCH_106" 2>/dev/null' || fail "Discussion が閉じても、見張り役が終わらない"
 [[ "$(comment_count 106)" -eq 0 ]] || fail "記録が消えた後に Discussion が閉じたのに、コメントを消していない"
