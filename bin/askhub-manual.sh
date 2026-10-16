@@ -271,7 +271,7 @@ write_status() {
   [[ -n "$discussion" && -n "$epic" && -n "$runner" ]] || fail "手動ループの記録がありません（先に start を実行してください）"
   # end で終えた（コメントを消した）ループは書き直さない。書くと、片付ける役（見張り役・次の start）がいないコメントが残る
   if [[ -n "$(state_get ended_at)" ]]; then
-    echo "Discussion #$discussion の手動ループは終えているため、ループの状態は書きません（続けるなら scripts/askhub-manual.sh resume $discussion）"
+    echo "Discussion #$discussion の手動ループは終えているため、ループの状態は書きません（続けるなら scripts/askhub-manual.sh resume ${discussion}）"
     return 0
   fi
   # 取得できないときも、ほかの書き出しの失敗と同じく警告だけ出して成功で返す（launch がループを起動した後に失敗で終わらないように）
@@ -300,7 +300,7 @@ write_status() {
   marker="$marker,\"writer\":\"manual\"}"
   body=$(cat <<BODY
 <!-- ask-hub:loop-status $marker -->
-## ループの状態（Discussion #$discussion）
+## ループの状態（Discussion #${discussion}）
 
 手動ループ（@$runner さんの Mac）が書き換えるコメントです。編集・削除しないでください（ゴール元の Discussion が閉じたら、手動ループが消します）。
 
@@ -616,9 +616,9 @@ start_final_watch() {
   # 見張り役が動いているかを外から確かめられるように残す（見張り役は final の後も状態の書き出しで記録ファイルを書く）
   state_set watch_pid "$watch_pid"
   if [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
-    echo "ASKHUB_AUTO_FINAL=0 のため、最終 PR は自動では作りません（ループが終わったら scripts/askhub-manual.sh final $LOOP_DISCUSSION）"
+    echo "ASKHUB_AUTO_FINAL=0 のため、最終 PR は自動では作りません（ループが終わったら scripts/askhub-manual.sh final ${LOOP_DISCUSSION}）"
   else
-    echo "ループが完了語を出して終わったら、最終 PR を自動で作ります（作れなかったときは scripts/askhub-manual.sh final $LOOP_DISCUSSION）"
+    echo "ループが完了語を出して終わったら、最終 PR を自動で作ります（作れなかったときは scripts/askhub-manual.sh final ${LOOP_DISCUSSION}）"
   fi
 }
 
@@ -644,7 +644,7 @@ watch_until_closed() {
     fi
     # 消せなければ次の確認でやり直す（ログには 1 回だけ書く）
     if [[ "$noted" != true ]]; then
-      watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じましたが、ループの状態のコメントを消せませんでした（やり直します。止めるなら scripts/askhub-manual.sh end $LOOP_DISCUSSION）"
+      watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じましたが、ループの状態のコメントを消せませんでした（やり直します。止めるなら scripts/askhub-manual.sh end ${LOOP_DISCUSSION}）"
       noted=true
     fi
   done
@@ -798,7 +798,7 @@ NEXT
     if [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
       : # 最終 PR は担当者が final で作る
     elif [[ -f "$LOOP_STATE" || -z "$PROMISE" ]] || ! grep -Fq "<promise>$PROMISE</promise>" "$WATCHED_LOG" 2>/dev/null; then
-      watch_note "ループが完了語を出さずに終わったため、最終 PR は作りません（続けるなら scripts/askhub-manual.sh resume $LOOP_DISCUSSION）"
+      watch_note "ループが完了語を出さずに終わったため、最終 PR は作りません（続けるなら scripts/askhub-manual.sh resume ${LOOP_DISCUSSION}）"
     else
       watch_note "ループが完了語を出して終わったので、最終 PR を作ります"
       if ! (cd "$MAIN" && "$KIT_DIR/bin/askhub-manual.sh" final "$LOOP_DISCUSSION"); then
