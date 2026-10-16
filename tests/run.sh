@@ -108,11 +108,11 @@ case "${positional[0]:-} ${positional[1]:-}" in
         now > "$S/comments/$id/updated"
         echo "{\"id\":$id}" | out ;;
       "PATCH comments/"*)
-        [[ -d "$S/comments/${rest#comments/}" ]] || { echo "Not Found" >&2; exit 1; }
+        [[ -d "$S/comments/${rest#comments/}" ]] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
         printf '%s' "$body" > "$S/comments/${rest#comments/}/body"
         now > "$S/comments/${rest#comments/}/updated" ;;
       "DELETE comments/"*)
-        [[ -d "$S/comments/${rest#comments/}" ]] || { echo "Not Found" >&2; exit 1; }
+        [[ -d "$S/comments/${rest#comments/}" ]] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
         rm -r "${S:?}/comments/${rest#comments/}" ;;
     esac ;;
   "issue list")
@@ -598,6 +598,28 @@ manual end 105 >/dev/null || fail "2 回目の end が失敗した"
 grep -q 'ask-hub:loop-status' "$GH_STATE/issues/60/body" && fail "end が、別の Issue の本文に残ったこのループの前の形の状態を片付けていない"
 cmp -s "$WORK/issue-body.before" "$GH_STATE/issues/$ISSUE/body" || fail "end が、オーケストレーターの書いた本文を書き換えた"
 ok "コメントを消すときは、別の Issue の本文に残った前の形の状態も片付け、オーケストレーターの本文には触らない"
+
+# 見張り役は、作業場所の記録が消えて別のプロセスの PID が書かれても（オーケストレーターが作り直したなど）、引き継いだと読まずに待ち、
+# Discussion が閉じたらコメントを消す
+manual start 106 epic/manual-six >/dev/null 2>&1 || fail "手動ループを start できない"
+D106="$WORK/repos/myapp-ralph-d106-ctl"
+perl -pi -e 's/\{\{[A-Z_]+\}\}/X/g' "$D106/.claude/ralph-playbook.local.md"
+printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$D106/.claude/ralph-goal.local.md"
+STUB_LOOP=promise manual launch 106 "SMOKE DONE" >/dev/null || fail "launch が失敗した"
+LOG_106=$(loop_log "$D106")
+WATCH_106=$(sed -n 's/^watch_pid=//p' "$D106/.claude/askhub-manual.local.txt" | tail -n 1)
+wait_watch "$LOG_106"
+wait_for comment_has 106 '"state":"completed"' || fail "最終 PR を作った後に、Discussion 106 のコメントを完了にしていない"
+rm -f "$D106/.claude/askhub-manual.local.txt"
+echo "$$" > "$D106/.claude/askhub-loop.pid"
+sleep 3
+kill -0 "$WATCH_106" 2>/dev/null || fail "記録が消えて別の PID が書かれただけで、見張り役が終わった"
+touch "$GH_STATE/closed-106"
+wait_for eval '! kill -0 "$WATCH_106" 2>/dev/null' || fail "Discussion が閉じても、見張り役が終わらない"
+[[ "$(comment_count 106)" -eq 0 ]] || fail "記録が消えた後に Discussion が閉じたのに、コメントを消していない"
+[[ ! -e "$D106/.claude/askhub-manual.local.txt" ]] || fail "消えた記録を作り直した"
+grep -q 'No such file' "$LOG_106" && fail "記録が消えた後、見張り役がログにエラーを書いた"
+ok "見張り役は、記録が消えて別の PID が書かれても待ち続け、Discussion が閉じたらコメントを消す"
 
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e
