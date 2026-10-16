@@ -223,6 +223,7 @@ refresh_trusted_authors() {
 # ---- ループの状態（状態用の Issue の、このループのコメント）--------------------------------
 # 状態用の Issue（loop-status）はリポジトリに 1 つ。ループ（Discussion）ごとに 1 つのコメントを置き、書き手は自分のループのコメントだけを書き換える
 # （ask-hub-apple の docs/protocol.md の「ループごとのコメントと本文の形」）。本文はオーケストレーターがリポジトリ全体の状態に使うので、手動ループは書かない
+# （kit 1.3 までがこのループの状態を本文に書いていれば、片付けるだけ）
 
 iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # GNU の書き方を先に試し、macOS（BSD）に戻す。GNU の stat は BSD の -f を「ファイルシステムの情報」と読んで成功するので、
@@ -345,6 +346,23 @@ STATUS_ISSUE_BODY='## ループの状態
 
 AskHub のループの状態を書き出す Issue です。ループの状態は、ループ（ゴール元の Discussion）ごとのコメントに書きます。編集・クローズしないでください。'
 
+# kit 1.3 までの手動ループが本文に書いた、このループの状態（前の形の目印。書き手 manual で、このループの Discussion のもの）を片付ける。
+# 残すと、このループのコメントを消した後に AskHub が本文から終わったループの行を出し、手動ループの Discussion が open なあいだは
+# オーケストレーターも本文を書き直さない。片付けるのはこのループの状態だけ（オーケストレーター・ほかのループが書いた本文には触らない）
+clear_legacy_body() {
+  local legacy
+  legacy=$(gh issue view "$1" -R "$REPOSITORY" --json body --jq '.body' \
+    | jq -R -s -r --argjson discussion "$LOOP_DISCUSSION" '
+        sub("^\\s+"; "") | capture("^<!--\\s*ask-hub:loop-status\\s(?<json>[^\\n]*?)-->") | .json | fromjson?
+        | select(type == "object" and .writer == "manual" and .discussion == $discussion) | "legacy"') || return 0
+  [[ "$legacy" == legacy ]] || return 0
+  if gh issue edit "$1" -R "$REPOSITORY" --body "$STATUS_ISSUE_BODY" >/dev/null; then
+    echo "状態用の Issue（#$1）の本文に残っていた、このループの前の形の状態を片付けました"
+  else
+    warn "状態用の Issue（#$1）の本文に残っている、このループの前の形の状態を片付けられませんでした（次の書き出しでやり直します）"
+  fi
+}
+
 # このループのコメントを書く（無ければ作る）。書けなかったときは警告を出して 1 を返す
 publish_status_comment() {
   local body="$1" trusted me candidates chosen issue url comments newest id
@@ -378,6 +396,7 @@ publish_status_comment() {
       gh issue reopen "$issue" -R "$REPOSITORY" >/dev/null 2>&1 || true
     fi
   fi
+  clear_legacy_body "$issue"
   if ! comments=$(own_status_comments "$issue" "$trusted"); then
     warn "状態用の Issue（#${issue}）のコメントを取得できないため、ループの状態を書きません"
     return 1
