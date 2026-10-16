@@ -23,7 +23,7 @@ cat > "$WORK/bin/gh" <<'GH'
 # テスト用の gh。GitHub の代わりに、状態用の Issue・そのコメント・閉じた Discussion を GH_STATE のファイルで持つ。
 # 応答は JSON で作り、--jq があれば jq で絞る（本物の gh と同じく、文字列はそのまま出す）。書き込み権限を持つのは test だけ。
 # Discussion はどの番号も manual-loop 付きで test が担当。GH_STATE/closed-<番号> があれば閉じている。
-# GH_LOG があれば、呼ばれた引数をそこに書き足す
+# gh のアカウントは GH_VIEWER（既定は test）。GH_LOG があれば、呼ばれた引数をそこに書き足す
 [[ -z "${GH_LOG:-}" ]] || printf '%s\n' "$*" >> "$GH_LOG"
 S="${GH_STATE:?}"
 mkdir -p "$S/issues" "$S/comments"
@@ -69,7 +69,7 @@ comments_of() {
 endpoint="${positional[1]:-}"
 case "${positional[0]:-} ${positional[1]:-}" in
   "repo view") echo '{"nameWithOwner":"example/myapp-ios"}' | out ;;
-  "api user") echo '{"login":"test"}' | out ;;
+  "api user") jq -n --arg login "${GH_VIEWER:-test}" '{login: $login}' | out ;;
   "api graphql")
     closed=false
     [[ -e "$S/closed-$number" ]] && closed=true
@@ -116,6 +116,7 @@ case "${positional[0]:-} ${positional[1]:-}" in
     printf '%s' "$body" > "$S/issues/$id/body"
     now > "$S/issues/$id/updated"
     echo "https://github.com/example/myapp-ios/issues/$id" ;;
+  "issue view") jq -n --rawfile body "$S/issues/${positional[2]}/body" '{body: $body}' | out ;;
   "issue reopen") printf '%s' OPEN > "$S/issues/${positional[2]}/state" ;;
   "issue edit") printf '%s' "$body" > "$S/issues/${positional[2]}/body" ;;
   "pr list") echo '[]' | out ;;
@@ -404,6 +405,23 @@ loop_comments() { # 状態用の Issue のコメントのうち、Discussion $1 
 }
 comment_count() { loop_comments "$1" | grep -c . || true; }
 comment_has() { loop_comments "$1" | grep -qF "$2"; }
+add_issue() { # $1=番号 $2=本文（author は test、open）
+  mkdir -p "$GH_STATE/issues/$1"
+  printf '%s' test > "$GH_STATE/issues/$1/author"
+  printf '%s' OPEN > "$GH_STATE/issues/$1/state"
+  printf '%s' "$2" > "$GH_STATE/issues/$1/body"
+  printf '%s' 2026-10-01T00:00:00Z > "$GH_STATE/issues/$1/updated"
+}
+add_comment() { # $1=id $2=Issue の番号 $3=author $4=本文 $5=更新日時
+  mkdir -p "$GH_STATE/comments/$1"
+  printf '%s' "$2" > "$GH_STATE/comments/$1/issue"
+  printf '%s' "$3" > "$GH_STATE/comments/$1/login"
+  printf '%s' "$4" > "$GH_STATE/comments/$1/body"
+  printf '%s' "$5" > "$GH_STATE/comments/$1/updated"
+}
+# kit 1.3 は、状態用の Issue の本文にこのループの状態を書いていた
+add_issue 50 '<!-- ask-hub:loop-status {"checkedAt":"2026-10-01T00:00:00Z","discussion":1,"epic":"epic/smoke","runner":"test","state":"running","writer":"manual"} -->
+## ループの状態'
 printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
 : > "$WORK/gh.log"
 OUT=$(STUB_LOOP=promise manual launch "SMOKE DONE") || fail "launch が失敗した"
@@ -414,17 +432,16 @@ grep -q -- '--label epic-final' "$WORK/gh.log" || fail "最終 PR に epic-final
 grep -q 'テストでしたこと' "$WORK/gh.log" || fail "最終 PR に state の「最終 PR に載せる内容」を載せていない"
 wait_for comment_has 1 '"state":"completed"' || fail "最終 PR を作った後に、ループの状態のコメントを完了にしていない: $(loop_comments 1)"
 [[ "$(comment_count 1)" -eq 1 ]] || fail "ループの状態のコメントが 1 つになっていない（$(comment_count 1) 件）"
-for d in "$GH_STATE/issues"/*; do
-  grep -q 'ask-hub:loop-status' "$d/body" && fail "手動ループが、状態用の Issue の本文にループの状態を書いた"
-done
-grep -q '^issue edit' "$WORK/gh.log" && fail "手動ループが、状態用の Issue の本文を書き換えた"
+[[ "$(find "$GH_STATE/issues" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 1 ]] || fail "状態用の Issue があるのに、新しく作った"
+grep -q 'ask-hub:loop-status' "$GH_STATE/issues/50/body" && fail "本文に残っていた、このループの前の形の状態を片付けていない"
+grep -q 'ループ（ゴール元の Discussion）ごとのコメントに書きます' "$GH_STATE/issues/50/body" || fail "片付けた本文が、手動ループが Issue を作るときの本文になっていない"
 touch "$GH_STATE/closed-1"
 wait_watch_exit
 [[ "$(comment_count 1)" -eq 0 ]] || fail "ゴール元の Discussion が閉じたのに、ループの状態のコメントを消していない"
 grep -q 'コメントを消しました' "$(loop_log)" || fail "コメントを消したことをログに書いていない"
 grep -q '^ended_at=' "$CTL/.claude/askhub-manual.local.txt" || fail "ループを終えたことを記録していない"
 rm -f "$GH_STATE/closed-1"
-ok "固定パスで始めた手動ループも続けて回せ、見張り役が最終 PR を作り、Discussion が閉じたらループの状態のコメントを消す"
+ok "固定パスで始めた手動ループも続けて回せ、本文に残った前の形の状態を片付け、見張り役が最終 PR を作り、Discussion が閉じたらコメントを消す"
 
 # promise を出さずに終わったとき（state ファイルが残る異常終了）は作らない（番号を付けても、固定パスのループを使う）
 printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
@@ -457,11 +474,7 @@ auto_untouched() {
 for d in "$GH_STATE/issues"/*; do ISSUE="${d##*/}"; break; done
 printf '%s' '<!-- ask-hub:loop-status {"checkedAt":"2026-10-15T00:00:00Z","state":"running","writer":"orchestrator"} -->' > "$GH_STATE/issues/$ISSUE/body"
 cp "$GH_STATE/issues/$ISSUE/body" "$WORK/issue-body.before"
-mkdir -p "$GH_STATE/comments/1"
-printf '%s' "$ISSUE" > "$GH_STATE/comments/1/issue"
-printf '%s' evil > "$GH_STATE/comments/1/login"
-printf '%s' '<!-- ask-hub:loop-status {"checkedAt":"2030-01-01T00:00:00Z","discussion":101,"runner":"evil","state":"running","writer":"manual"} -->' > "$GH_STATE/comments/1/body"
-printf '%s' 2030-01-01T00:00:00Z > "$GH_STATE/comments/1/updated"
+add_comment 1 "$ISSUE" evil '<!-- ask-hub:loop-status {"checkedAt":"2030-01-01T00:00:00Z","discussion":101,"runner":"evil","state":"running","writer":"manual"} -->' 2030-01-01T00:00:00Z
 cp "$GH_STATE/comments/1/body" "$WORK/evil.before"
 
 : > "$WORK/gh.log"
@@ -534,6 +547,36 @@ OUT=$(manual start 105 epic/manual-five 2>&1) || fail "4 つ目の手動ルー�
 auto_untouched || fail "手動ループの操作が、自動ループの制御用 worktree に触った"
 { kill "$AUTO_PID" && wait "$AUTO_PID"; } 2>/dev/null || true
 ok "start は、Discussion の閉じたほかの手動ループのコメントを消す。手動ループの操作は自動ループの制御用 worktree に触らない"
+
+# 同じループのコメントが重なっていたら、最新を書き換えて残りを消す。信用する author でも、オーケストレーターが書いた同じ Discussion のコメントには触らない。
+# スロットの中から番号を省いて呼んでも、そのループを使う。番号の先頭の 0 は外す
+add_comment 2 "$ISSUE" test '<!-- ask-hub:loop-status {"checkedAt":"2026-01-01T00:00:00Z","discussion":105,"runner":"test","state":"running","writer":"manual"} -->' 2026-01-01T00:00:00Z
+add_comment 3 "$ISSUE" test '<!-- ask-hub:loop-status {"checkedAt":"2026-01-01T00:00:00Z","discussion":105,"state":"running","writer":"orchestrator"} -->' 2026-01-01T00:00:00Z
+cp "$GH_STATE/comments/3/body" "$WORK/orchestrator.before"
+[[ "$(comment_count 105)" -eq 2 ]] || fail "重なったコメントを用意できていない"
+(cd "$WORK/repos/myapp-ralph-d105-a" && GH_LOG="$WORK/gh.log" scripts/askhub-manual.sh status --stopping >/dev/null) || fail "スロットの中から status を書けない"
+[[ "$(comment_count 105)" -eq 1 && ! -e "$GH_STATE/comments/2" ]] || fail "重なった古いコメントを消していない"
+cmp -s "$WORK/orchestrator.before" "$GH_STATE/comments/3/body" || fail "オーケストレーターが書いた、同じ Discussion のコメントに触った"
+manual status 0105 --stopping >/dev/null || fail "先頭に 0 の付いた番号で status を書けない"
+[[ "$(comment_count 105)" -eq 1 ]] || fail "先頭に 0 の付いた番号で、別のコメントを作った"
+ok "重なったコメントは最新だけを残し、オーケストレーターのコメントには触らない。スロットの中・先頭に 0 の付いた番号でも同じループを使う"
+
+# gh のアカウントが信用する author でなければ書かない。番号だけの launch は完了語の付け忘れとして断る
+BEFORE_105=$(loop_comments 105)
+GH_VIEWER=evil manual status 105 --stopping >/dev/null 2>"$WORK/status.err" || fail "信用外のアカウントの status が失敗で終わった（ループを止めてしまう）"
+grep -q '信用する author ではない' "$WORK/status.err" || fail "信用外のアカウントで書かないことを知らせていない"
+[[ "$(loop_comments 105)" == "$BEFORE_105" && "$(comment_count 105)" -eq 1 ]] || fail "信用外のアカウントでループの状態を書いた"
+if manual launch 105 >"$WORK/launch.out" 2>&1; then fail "番号だけの launch で起動した"; fi
+grep -q '完了語を指定してください' "$WORK/launch.out" || fail "完了語の付け忘れを知らせていない: $(cat "$WORK/launch.out")"
+ok "信用外のアカウントではループの状態を書かず、番号だけの launch は断る"
+
+# end で終えたループは、status を流してもコメントを作り直さない（片付ける役がいないコメントを残さない）
+manual end 105 >"$WORK/end.out" || fail "end が失敗した"
+grep -q 'open のままです' "$WORK/end.out" || fail "end が、Discussion が open のままだと知らせていない"
+manual status 105 --stopping >"$WORK/status.out" 2>&1 || fail "終えたループの status が失敗で終わった"
+grep -q '終えているため' "$WORK/status.out" || fail "終えたループの状態を書かないことを知らせていない"
+[[ "$(comment_count 105)" -eq 0 ]] || fail "end で終えたループの status が、コメントを作り直した"
+ok "end で終えたループは、status でコメントを作り直さない"
 
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e
