@@ -171,7 +171,11 @@ add_worktree "$SLOT_B" --detach
 
 # ループの作業ファイルは git に載せない（.gitignore は汚さない）
 EXCLUDE="$(git rev-parse --git-common-dir)/info/exclude"
-grep -qxF '.claude/*.local.md' "$EXCLUDE" 2>/dev/null || echo '.claude/*.local.md' >> "$EXCLUDE"
+# 手動ループの記録（askhub-manual.sh の .claude/askhub-manual.local.txt）とループの PID（.claude/askhub-loop.pid）も除く。
+# 残すと、制御用 worktree の git add -A で統合ブランチに載り、git worktree remove も未追跡のファイルで断る
+for pattern in '.claude/*.local.md' '.claude/*.local.txt' '.claude/askhub-loop.pid'; do
+  grep -qxF "$pattern" "$EXCLUDE" 2>/dev/null || echo "$pattern" >> "$EXCLUDE"
+done
 
 # テンプレートを制御用 worktree へ配置
 mkdir -p "$CTL/.claude"
