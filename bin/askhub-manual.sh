@@ -437,7 +437,7 @@ discussion_closed() {
     -f o="$OWNER" -f r="$REPO" -F n="$1" --jq '.data.repository.discussion.closed'
 }
 
-# 信用する author が作った状態用の Issue（閉じたものも）から、このループのコメントをすべて消す
+# 信用する author が作った状態用の Issue（閉じたものも）から、このループのコメントをすべて消す（本文に残った前の形のこのループの状態も片付ける）
 delete_status_comments() {
   local trusted candidates issue ids id error
   if ! trusted=$(trusted_authors) || [[ -z "$trusted" ]]; then
@@ -449,6 +449,8 @@ delete_status_comments() {
     return 1
   fi
   for issue in $(cut -f 3 <<<"$candidates"); do
+    # kit 1.3 までがこのループの状態を本文に書いたまま（この版でコメントを書かずに終えた・別の Issue の本文に残っている）なら、それも片付ける
+    clear_legacy_body "$issue"
     if ! ids=$(own_status_comments "$issue" "$trusted"); then
       warn "状態用の Issue（#${issue}）のコメントを取得できないため、ループの状態のコメントを消せません"
       return 1
