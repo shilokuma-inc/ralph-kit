@@ -3,6 +3,25 @@
 各アプリのリポジトリは `.claude/ralph/kit.conf` の `ref=v1` で、v1 の最新を使う（`VERSION` を上げた PR が main に入ると、`release.yml` が `v1` を動かす）。
 互換を崩す変更（各リポジトリの中継・`kit.conf`・ワークフローの呼び出しの形を変える必要があるもの）は v2 にする。
 
+## 1.4.0（2026-10-16）
+
+手動ループを、同じリポジトリで並べて回せるようにした（同じ Mac で同じリポジトリの手動ループを複数回すのも含む。ask-hub-apple の Discussion #425）。
+
+- 手動ループの作業場所を Discussion ごとに分けた（制御用 worktree `<名前>-ralph-d<番号>-ctl`、スロット `-d<番号>-a` / `-b`、ログ `<名前>-d<番号>-loop-*.log`）。
+  オーケストレーターの自動ループの `<名前>-ralph-ctl` には触らないので、自動ループの制御用 worktree があっても `start` できる
+- `launch` / `status` / `resume` / `final` に Discussion の番号を付けられる（`launch <番号> <完了語>` など）。番号を省くと、制御用 worktree・スロットの中ではそのループを、
+  ほかの場所ではこの Mac の手動ループが 1 つだけならそれを使う（2 つ以上なら断る）。これまでの呼び方（番号なし）は、手動ループが 1 つなら今までどおり動く
+- ループの状態を、状態用の Issue の本文ではなく、そのループのコメント（`ask-hub:loop-status` の目印に `discussion`・`writer: manual`・`runner`）に書く。
+  自分のコメントは、信用する author のコメントのうち目印の `discussion` と `writer` で見つける。gh のアカウントが信用する author でなければ書かない。
+  読む側は ask-hub-apple の develop（#448 以降）の AskHub とオーケストレーター。それより前の版は本文しか読まないので、手動ループの状態が出ない
+- ゴール元の Discussion が閉じたら、そのループのコメントを消す（見張り役が 10 分おきに確かめる。見張り役が動いていなかったときは、同じリポジトリの次の `start` が消す）。
+  Discussion を閉じずにやめるときのために `end` を足した（終えたループは、`status` を流しても書き直さず、見張り役も最終 PR を作らない）
+- `ASKHUB_AUTO_FINAL=0` でも見張り役を起動する（最終 PR は作らず、Discussion が閉じたらコメントを消すためだけに動く）
+- `ralph-setup.sh` に `RALPH_LOOP_ID` を足した（作業場所の名前に足して別の組を作る。既定は今までどおり）。epic をほかの worktree が checkout していれば、理由を出して止める
+- `ralph-setup.sh` が、手動ループの記録（`.claude/*.local.txt`）とループの PID（`.claude/askhub-loop.pid`）も git の除外に足す（制御用 worktree の `git add -A` で epic に載らないように）
+- 取得に失敗したとき、playbook の信用する author を空にしない・状態の書き出しで落ちない（1.3 からの不具合）
+- kit 1.3 までに `<名前>-ralph-ctl` で始めた手動ループは、移さずにその場所のまま最後まで回せる（状態の書き出しは、この版で起動し直したときからコメントになる。本文に残ったこのループの前の形の状態は、コメントを書くとき・消すときに片付ける）
+
 ## 1.3.0（2026-10-12）
 
 - 手動ループの `askhub-manual.sh launch` / `resume` が、ループと一緒に見張り役（`watch-final`）を裏で起動する。

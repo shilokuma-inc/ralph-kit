@@ -2,7 +2,9 @@
 # ralph-loop の作業環境を用意する。
 #   usage: scripts/ralph-setup.sh epic/機能名 [起点ブランチ]
 # 統合ブランチはテーマ単位で `epic/[機能名]` の形式にする（例: epic/monetization）。
-# 制御用 1 枠 + 作業スロット 2 枠の worktree をリポジトリの隣に作る。
+# 制御用 1 枠 + 作業スロット 2 枠の worktree をリポジトリの隣に作る（<名前>-ralph-ctl・-ralph-a・-ralph-b。<名前> はディレクトリ名から -ios を除いたもの）。
+# RALPH_LOOP_ID（英小文字・数字）を付けると、名前に足して別の組を作る（<名前>-ralph-<ID>-ctl・-a・-b）。
+# 手動ループ（askhub-manual.sh）は d<Discussion 番号> を付け、同じリポジトリのほかのループと作業場所を分ける
 set -euo pipefail
 
 # Git hook や wrapper から継承した経路変数が別のチェックアウトを指すことがある
@@ -22,13 +24,20 @@ if [[ "$INTEGRATION" != epic/* ]]; then
   exit 1
 fi
 BASE="${2:-develop}"
+LOOP_ID="${RALPH_LOOP_ID:-}"
+# 名前の区切り（-ctl・-a・-b）と紛れないよう、ハイフンは受け付けない
+if [[ -n "$LOOP_ID" && ! "$LOOP_ID" =~ ^[a-z0-9]+$ ]]; then
+  echo "RALPH_LOOP_ID は英小文字と数字だけにしてください（指定: ${LOOP_ID}）" >&2
+  exit 1
+fi
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
 REPO_NAME=$(basename "$REPO_ROOT")
 PARENT=$(dirname "$REPO_ROOT")
-CTL="$PARENT/${REPO_NAME%-ios}-ralph-ctl"
-SLOT_A="$PARENT/${REPO_NAME%-ios}-ralph-a"
-SLOT_B="$PARENT/${REPO_NAME%-ios}-ralph-b"
+PREFIX="$PARENT/${REPO_NAME%-ios}-ralph${LOOP_ID:+-$LOOP_ID}"
+CTL="$PREFIX-ctl"
+SLOT_A="$PREFIX-a"
+SLOT_B="$PREFIX-b"
 
 cd "$REPO_ROOT"
 git remote get-url origin >/dev/null 2>&1 \
@@ -118,10 +127,25 @@ add_worktree() { # $1=パス $2=追加オプション
     echo "エラー: $path は worktree ではありません。別の場所へ退避してください" >&2
     exit 1
   else
+    # 統合ブランチは 1 つの worktree でしか checkout できない。同じ epic を、別のループ（オーケストレーターの自動ループ・
+    # ほかの Discussion の手動ループ）の制御用 worktree が使っていれば、git の失敗の前に理由を出して止める
+    if [[ "$path" == "$CTL" ]]; then
+      local holder
+      # awk は途中で exit せずに最後まで読む（先に抜けると、上流の git が SIGPIPE で落ち、pipefail で止まる）
+      holder=$(git worktree list --porcelain | awk -v branch="branch refs/heads/$INTEGRATION" '
+        /^worktree / { wt = substr($0, 10) }
+        $0 == branch && found == "" { found = wt }
+        END { if (found != "") print found }')
+      if [[ -n "$holder" ]]; then
+        echo "エラー: $INTEGRATION は、別の worktree（${holder}）が checkout しています" >&2
+        echo "      ほかのループが使っている epic です。別の epic 名にするか、そのループが終わってから実行してください" >&2
+        exit 1
+      fi
+    fi
     git worktree add "$@" "$path" "$INTEGRATION"
   fi
 }
-# 制御用 worktree は固定パスなので、別の epic を指定しても登録済みという理由だけで
+# 制御用 worktree はループの組ごとに固定のパスなので、別の epic を指定しても登録済みという理由だけで
 # 再利用されてしまう。前の epic の goal / state が残ったまま走るのを防ぐ。
 if is_worktree "$CTL"; then
   CURRENT=$(git -C "$CTL" symbolic-ref --short HEAD 2>/dev/null || echo "(detached)")
@@ -147,7 +171,11 @@ add_worktree "$SLOT_B" --detach
 
 # ループの作業ファイルは git に載せない（.gitignore は汚さない）
 EXCLUDE="$(git rev-parse --git-common-dir)/info/exclude"
-grep -qxF '.claude/*.local.md' "$EXCLUDE" 2>/dev/null || echo '.claude/*.local.md' >> "$EXCLUDE"
+# 手動ループの記録（askhub-manual.sh の .claude/askhub-manual.local.txt）とループの PID（.claude/askhub-loop.pid）も除く。
+# 残すと、制御用 worktree の git add -A で統合ブランチに載り、git worktree remove も未追跡のファイルで断る
+for pattern in '.claude/*.local.md' '.claude/*.local.txt' '.claude/askhub-loop.pid'; do
+  grep -qxF "$pattern" "$EXCLUDE" 2>/dev/null || echo "$pattern" >> "$EXCLUDE"
+done
 
 # テンプレートを制御用 worktree へ配置
 mkdir -p "$CTL/.claude"
