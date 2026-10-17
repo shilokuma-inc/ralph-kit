@@ -1,6 +1,6 @@
 # ralph-kit
 
-shilokuma-inc の各アプリのリポジトリで使う ralph-loop 一式の正本。仕組みは `README.md` を読む。
+各アプリのリポジトリ（shilokuma-inc 以外の organization のものも含む）で使う ralph-loop 一式の正本。仕組みは `README.md` を読む。
 **ここを直すと、v1 のタグが動いた時点で全リポジトリのループに届く。** 壊れた版を出すと全リポジトリのループが同時に止まるので、次を守る。
 
 ## 変更するとき
