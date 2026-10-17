@@ -88,9 +88,10 @@ kit は public なので、shilokuma-inc 以外の organization のリポジト�
 | AskHub の設定 | 「取得する organization」に足す。トークンは、すべての organization に届くもの（classic PAT の `repo` と `read:org` など）にする |
 | オーケストレーターの設定 | `repositories` に `owner/repo` で足す（owner は別の organization でよい） |
 
-- CodeRabbit は任意。入れないと最終 PR に CodeRabbit のレビューが付かないだけで、子 PR・最終 PR のマージ条件には関係しない
+- CodeRabbit は任意。入れないと最終 PR に CodeRabbit のレビューが付かないだけで、ループと AskHub のマージ条件には関係しない。
+  ただし、ブランチ保護や ruleset で CodeRabbit の check を必須にしているリポジトリでは、入れないとマージできない
 - アプリのワークフローが使う secrets（App Store Connect の API Key など）は、その organization にも登録する（kit とは関係ない）
-- kit を直すと、v1 のタグが動いた時点で、**すべての organization** のリポジトリのループに届く
+- kit を直すと、v1 のタグが動いた時点で、organization に関係なく `ref=v1`（既定）で使っているすべてのリポジトリのループに届く
 
 既にあるリポジトリを別の organization に移したときは、オーケストレーターの設定の `repository` とメインの checkout の `origin` を書き換える
 （GraphQL の `repository(owner:, name:)` は移転前の名前を新しい場所に転送しない）。
