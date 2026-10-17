@@ -1,7 +1,7 @@
 # ralph-kit
 
 [ralph-loop](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/ralph-loop) で
-自律的に実装を回すための一式（playbook・スクリプト・ワークフロー）の正本。shilokuma-inc の各アプリのリポジトリは、
+自律的に実装を回すための一式（playbook・スクリプト・ワークフロー）の正本。各アプリのリポジトリ（shilokuma-inc 以外の organization のものも含む）は、
 このリポジトリをコピーせずに、中継スクリプトで呼んで使う。設計の根拠と、実際に踏んだ落とし穴は
 [template-app-ios の Discussion #87](https://github.com/shilokuma-inc/template-app-ios/discussions/87) を参照。
 
@@ -73,6 +73,28 @@ ralph-kit/install.sh --check ~/path/to/myapp-ios  # ずれがあれば表示し�
 
 `CLAUDE.md` の「## ralph-loop による自律開発」の節は、`<!-- ralph-kit:snippet begin -->` と `end` の間だけを kit の内容にそろえる。
 このリポジトリだけの注意（検証コマンドの癖など）は end の後に書く。
+
+### ほかの organization のリポジトリで使う
+
+kit は public なので、shilokuma-inc 以外の organization のリポジトリからも、そのまま使える（中継の取得も、
+`close-goal-discussion.yml` の `uses: shilokuma-inc/ralph-kit/...@v1` も動く）。kit 自身は Actions の secrets を使わない。
+入れる手順は上と同じで、加えて次をそろえる。
+
+| どこで | すること |
+| --- | --- |
+| organization の Settings → Actions → General | 使える Actions を絞っているなら、`shilokuma-inc/ralph-kit/*` を許可する（Discussion を閉じるワークフローが動かない） |
+| organization の Member privileges | Base permission を Read にする。Write だと、メンバー全員が書き込み権限を持つ人（信用する author）として、ループに指示できる |
+| リポジトリの Settings | Discussions を有効にする（ゴール元の Discussion を使う） |
+| AskHub の設定 | 「取得する organization」に足す。トークンは、すべての organization に届くもの（classic PAT の `repo` と `read:org` など）にする |
+| オーケストレーターの設定 | `repositories` に `owner/repo` で足す（owner は別の organization でよい） |
+
+- CodeRabbit は任意。入れないと最終 PR に CodeRabbit のレビューが付かないだけで、ループと AskHub のマージ条件には関係しない。
+  ただし、ブランチ保護や ruleset で CodeRabbit の check を必須にしているリポジトリでは、入れないとマージできない
+- アプリのワークフローが使う secrets（App Store Connect の API Key など）は、その organization にも登録する（kit とは関係ない）
+- kit を直すと、v1 のタグが動いた時点で、organization に関係なく `ref=v1`（既定）で使っているすべてのリポジトリのループに届く
+
+既にあるリポジトリを別の organization に移したときは、オーケストレーターの設定の `repository` とメインの checkout の `origin` を書き換える
+（GraphQL の `repository(owner:, name:)` は移転前の名前を新しい場所に転送しない）。
 
 ### kit を直すとき
 
