@@ -108,7 +108,7 @@ OpenCode のときの起動は、権限モードの確認（`claude` の起動�
 | --- | --- |
 | `opencode の実行ファイルが見つかりません` | PATH に通すか `ASKHUB_OPENCODE` を設定する（省略時は OpenCode.app 内を探す） |
 | 設定したのに Claude Code で回る | そのターミナルで `echo "$ASKHUB_AGENT"` が `opencode` か、`scripts/ralph-kit.sh version` が 1.6.0 以降かを確認する（設定後はターミナルを開き直す） |
-| `ralph-loop が有効になっていません` で始まらない | Claude Code（既定）で回す人向け。`claude plugin install ralph-loop@claude-plugins-official`。OpenCode のつもりなら `ASKHUB_AGENT` の設定を確認する |
+| `ralph-loop@claude-plugins-official が有効になっていません` と言われて始まらない | Claude Code（既定）で回す人向け。`claude plugin install ralph-loop@claude-plugins-official` で入れる。OpenCode のつもりなら `ASKHUB_AGENT` の設定を確認する |
 | ループが止まっている | ログの末尾を確認し、`resume`（AskHub から指示をコピー） |
 | 古い kit のまま | `v1` の取り直しは既定 5 分間隔。`RALPH_KIT_FETCH_INTERVAL=0 scripts/ralph-kit.sh version` |
 | 最終 PR が無い | 見張り役のメッセージ（ログ）を確認し、`final <N>` を手で流す |
