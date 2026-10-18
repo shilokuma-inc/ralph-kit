@@ -17,8 +17,9 @@
 #   1. start:  担当者が自分か確かめ、ralph-setup.sh で制御用 worktree とスロットを作り、epic を origin に push してから ready-for-loop を外す。
 #              信用する author（このリポジトリに書き込み権限を持つ人）を表示し、ループの状態を「開始待ち」で書く
 #   2. （Claude が playbook の {{...}} を埋め、STEP A に沿って goal を作る）
-#   3. launch: 完了語を記録し、ralph-start.sh で state を作り、制御用 worktree で claude -p のループをバックグラウンドで起動する
-#              （bypassPermissions で起動する。MDM などで禁止された Mac では auto モード。どちらも使えなければ起動しない）
+#   3. launch: 完了語を記録し、ralph-start.sh で state を作り、制御用 worktree でループをバックグラウンドで起動する。
+#              既定は claude -p（bypassPermissions で起動する。MDM などで禁止された Mac では auto モード。どちらも使えなければ起動しない）。
+#              ASKHUB_AGENT=opencode のときは bin/opencode-loop.sh（opencode run --auto）で起動する（README の「OpenCode で回す」を参照）
 #              あわせて見張り役（watch-final）を裏で起動し、ループが完了語を出して終わったら final を流す（ASKHUB_AUTO_FINAL=0 なら流さない）
 #   4. status: ループの状態を、状態用の Issue のこのループのコメントに、書き手 manual・回している人つきで書く（playbook の STEP D から呼ぶ。10 分に 1 回まで）
 #   5. resume: 回答が付いた後などに、記録した完了語でループを起動し直す（launch と同じく見張り役も起動する）
@@ -29,7 +30,8 @@
 #              見張り役が動いていなかったときは、次の start（同じリポジトリのどの Discussion でも）が消す
 #      end:    Discussion を閉じずにループをやめるときに、このループのコメントを消す
 #
-# 必要なもの: gh（このリポジトリに書き込み権限のあるアカウントでログイン済み）・git・jq・claude（ralph-loop プラグイン入り）
+# 必要なもの: gh（このリポジトリに書き込み権限のあるアカウントでログイン済み）・git・jq・claude（ralph-loop プラグイン入り。
+#             ASKHUB_AGENT=opencode のときは claude の代わりに OpenCode の CLI）
 set -euo pipefail
 
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
@@ -117,7 +119,7 @@ manual_loops() {
   done
 }
 
-# 制御用 worktree・スロットの中から呼ばれたら、そのループの Discussion の番号（ループの Claude が status を呼ぶとき）
+# 制御用 worktree・スロットの中から呼ばれたら、そのループの Discussion の番号（ループのエージェントが status を呼ぶとき）
 loop_from_cwd() {
   local top base rest
   top=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
@@ -565,8 +567,72 @@ loop_permission_mode() {
   echo auto
 }
 
+# OpenCode の実行ファイル（ASKHUB_AGENT=opencode のときに使う）。ASKHUB_OPENCODE → PATH → macOS の既定の場所の順に探す
+opencode_bin() {
+  local bin="${ASKHUB_OPENCODE:-}"
+  if [[ -z "$bin" ]]; then
+    bin=$(command -v opencode 2>/dev/null || true)
+  fi
+  if [[ -z "$bin" && -x /Applications/OpenCode.app/Contents/Resources/opencode-cli ]]; then
+    bin=/Applications/OpenCode.app/Contents/Resources/opencode-cli
+  fi
+  [[ -n "$bin" && -x "$bin" ]] || return 1
+  printf '%s\n' "$bin"
+}
+
+# launch_loop の OpenCode 版。権限モードの確認（claude の起動）は行わず、常に opencode run --auto で起動する
+# （--auto でも明示された deny は常に優先される）。state のよけ方・ログ・PID・見張り役は Claude 版と同じにして、
+# watch-final・final・status・ralph-stop.sh が無改修で動くようにする
+launch_loop_opencode() {
+  local promise="$1" oc_bin
+  oc_bin=$(opencode_bin) || fail "opencode の実行ファイルが見つかりません。PATH に通すか、ASKHUB_OPENCODE で指定してください（例: ASKHUB_OPENCODE=/Applications/OpenCode.app/Contents/Resources/opencode-cli）"
+  loop_alive && fail "Discussion #$LOOP_DISCUSSION のループは既に動いています（PID $(cat "$PID_FILE")）。止めるには、$CTL で scripts/ralph-stop.sh"
+  # 前のループが残した state をよけてから ralph-start.sh で作り直す（ralph-start.sh は state があると止まる）。
+  # 作り終えてから消す。途中で中断されたときは元に戻す（止まったループの状態を status が正しく出せるように）
+  local saved_state=""
+  if [[ -f "$LOOP_STATE" ]]; then
+    saved_state="$LOOP_STATE.saved"
+    mv "$LOOP_STATE" "$saved_state"
+    # shellcheck disable=SC2064  # trap からは関数の local が見えないので、今の値を printf %q で引用して埋め込む
+    trap "mv $(printf '%q' "$saved_state") $(printf '%q' "$LOOP_STATE") 2>/dev/null || true" EXIT
+    trap 'exit 130' INT TERM
+  fi
+  (cd "$CTL" && "$KIT_DIR/bin/ralph-start.sh" "$promise" >/dev/null)
+  [[ -f "$LOOP_STATE" ]] || fail "state ファイルを作れませんでした: $LOOP_STATE"
+  if [[ -n "$saved_state" ]]; then
+    trap - EXIT INT TERM
+    rm -f "$saved_state"
+  fi
+  mkdir -p "$LOG_DIR"
+  local log
+  # 同じリポジトリのほかの手動ループと取り違えないよう、Discussion の番号を入れる（Claude 版と同じ）
+  log="$LOG_DIR/$STEM-d$LOOP_DISCUSSION-loop-$(date +%Y%m%d-%H%M%S).log"
+  # 制御用 worktree で opencode-loop.sh のループを起動する。周回中の scripts/askhub-manual.sh status なども、
+  # 起動したときと同じ版の kit を使うよう、kit の場所を渡す（ASKHUB_OPENCODE で実行ファイルも固定する）
+  (
+    cd "$CTL"
+    RALPH_KIT_DIR="$KIT_DIR" ASKHUB_OPENCODE="$oc_bin" nohup "$KIT_DIR/bin/opencode-loop.sh" "$promise" </dev/null >>"$log" 2>&1 &
+    echo $! > "$PID_FILE"
+  )
+  state_set log "$log"
+  state_set permission_mode auto
+  # end で終えたループを起動し直したら、終えた記録を外す（見張り役が、Discussion が閉じたらまたコメントを消せるように）
+  state_unset ended_at
+  echo "ループを起動しました（PID $(cat "$PID_FILE")、実行エージェント: OpenCode、ログ: ${log}）"
+  echo "進み具合を見るには: tail -f \"${log}\""
+  start_final_watch "$(tr -d '[:space:]' < "$PID_FILE")" "$log"
+  write_status false true
+}
+
 launch_loop() {
   local promise="$1"
+  # ループの実行エージェント。既定は claude（ralph-loop プラグインの Stop hook が周回させる）。
+  # opencode のときは bin/opencode-loop.sh が周回させる
+  if [[ "${ASKHUB_AGENT:-claude}" == opencode ]]; then
+    launch_loop_opencode "$promise"
+    return
+  fi
+  [[ "${ASKHUB_AGENT:-claude}" == claude ]] || fail "ASKHUB_AGENT の値が分かりません: ${ASKHUB_AGENT}（claude か opencode を指定してください）"
   command -v "${ASKHUB_CLAUDE:-claude}" >/dev/null 2>&1 || fail "claude が見つかりません"
   loop_alive && fail "Discussion #$LOOP_DISCUSSION のループは既に動いています（PID $(cat "$PID_FILE")）。止めるには、$CTL で scripts/ralph-stop.sh"
   # 権限モードは、ループの state ファイルをよけてから確かめる（確認の起動がループの Stop hook に捕まらないように）。
@@ -613,7 +679,7 @@ launch_loop() {
 }
 
 # ループが終わったら最終 PR を作る見張り役を、裏で起動する（自動ループでオーケストレーターが作るのと同じく、担当者に final を頼ませない）。
-# 見張り役はメインの checkout で動くシェルで、ループの Claude ではないので、ループの deny（gh pr create --base develop）には当たらない。
+# 見張り役はメインの checkout で動くシェルで、ループのエージェントではないので、ループの deny（gh pr create --base develop）には当たらない。
 # ASKHUB_AUTO_FINAL=0 なら最終 PR は作らない（担当者が final を流す）。そのときも、Discussion が閉じたらコメントを消すために起動する
 start_final_watch() {
   local pid="$1" log="$2" watch_pid
@@ -811,8 +877,9 @@ NEXT
       watch_note "end で終えたため、最終 PR は作りません"
       exit 0
     fi
-    # Stop hook は promise を受けると state ファイルを消す。残っていれば promise を出さずに終わった（API のエラーなどの異常終了）。
-    # ralph-stop.sh で止めたとき・無進捗で止まったときも state ファイルは消えるので、claude -p の最後の出力（ログ）の promise でも確かめる
+    # Stop hook（Claude）・opencode-loop.sh（OpenCode）は promise を受けると state ファイルを消す。
+    # 残っていれば promise を出さずに終わった（API のエラーなどの異常終了）。
+    # ralph-stop.sh で止めたとき・無進捗で止まったときも state ファイルは消えるので、ループの最後の出力（ログ）の promise でも確かめる
     PROMISE=$(state_get promise)
     if [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
       : # 最終 PR は担当者が final で作る
