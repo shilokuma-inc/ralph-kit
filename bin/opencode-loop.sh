@@ -195,9 +195,11 @@ ${BODY}"
   CURRENT_CHILD=""
   elapsed=$(( $(date +%s) - started ))
 
-  # ログに残すのは、テキスト（そのまま）と、使ったツールの名前だけにする。
-  # 最後のメッセージの <promise>…</promise> を watch-final がログから拾えるように、復号した形で書く
-  jq -r 'if .type == "text" then .part.text
+  # ログに残すのは、テキストと、使ったツールの名前だけにする。見張り役（watch-final）はログの
+  # <promise>完了語</promise> で最終 PR を作るか決めるので、モデルのメッセージのタグは崩して書く
+  # （上限に達したとき・ralph-stop.sh で止めたとき・中断したときも state は消えるため、途中のメッセージの
+  # promise がそのままログにあると、誤って最終 PR を作ってしまう）。完了を検知したときだけ、下で完全な形を書く
+  jq -r 'if .type == "text" then (.part.text | gsub("<promise>"; "<promise:log>"))
          elif .type == "tool_use" and .part.state.status == "completed" then "[tool] " + (.part.tool // "?")
          else empty end' "$OUT" 2>/dev/null || echo "（opencode の JSON 出力を読み取れませんでした）"
   if [[ -s "$ERR" ]]; then
@@ -227,6 +229,8 @@ ${BODY}"
   if printf '%s' "$LAST_TEXT" | grep -Fq "<promise>$PROMISE</promise>"; then
     rm -f "$STATE"
     echo
+    # 見張り役（watch-final）は、ログのこの行で最終 PR を作るか決める（途中のメッセージのタグは崩してある）
+    printf '<promise>%s</promise>\n' "$PROMISE"
     echo "完了語を検知しました（${iter} 周）。state を消しました。"
     echo "次: メインの checkout で scripts/askhub-manual.sh final（見張り役が動いていれば自動で作ります）"
     exit 0

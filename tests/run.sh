@@ -635,7 +635,9 @@ cat > "$WORK/bin/opencode" <<'OPENCODE'
 #!/bin/bash
 # テスト用の opencode。引数を機械的に読める形でログに残す（mode は --session の有無）。
 # 1 回目（--session なし）はセッションだけ作って失敗し、2 回目（--session あり）は Claude の stub と同じく
-# ゴールを終えて「最終 PR に載せる内容」を書き、promise のテキストを出す（セッションの継続と再試行の確認）
+# ゴールを終えて「最終 PR に載せる内容」を書き、promise のテキストを出す（セッションの継続と再試行の確認）。
+# STUB_OPENCODE_STRAY=1 のときは、途中のメッセージに promise を出したまま、state を消して止まる
+# （完了語を出さずに終わったのに、見張り役が最終 PR を作らないことの確認用）
 mode=title model=no
 for a in "$@"; do
   [[ "$a" == "--session" ]] && mode=session
@@ -646,6 +648,16 @@ done
   printf 'arg: %s\n' "$@"
 } >> "${STUB_OPENCODE_LOG:-/dev/null}"
 echo '{"type":"step_start","sessionID":"ses_test"}'
+if [[ "${STUB_OPENCODE_STRAY:-}" == 1 ]]; then
+  if [[ "$mode" == session ]]; then
+    echo '{"type":"text","sessionID":"ses_test","part":{"type":"text","messageID":"msg_3","text":"指示どおり、state を消して止めます。"}}'
+    rm -f .claude/ralph-loop.local.md
+  else
+    echo '{"type":"text","sessionID":"ses_test","part":{"type":"text","messageID":"msg_1","text":"作業中です。\n<promise>SMOKE DONE</promise>"}}'
+    echo '{"type":"text","sessionID":"ses_test","part":{"type":"text","messageID":"msg_2","text":"まだ続けます。"}}'
+  fi
+  exit 0
+fi
 if [[ "${STUB_OPENCODE_FAIL:-}" == always || "$mode" != session ]]; then
   echo 'API Error: Connection refused' >&2
   exit 1
@@ -685,7 +697,9 @@ wait_for comment_has 107 '"state":"completed"' || fail "OpenCode のループの
 grep -qx 'arg: --auto' "$WORK/opencode.log" || fail "--auto で起動していない"
 grep -q 'OpenCode で回っている' "$WORK/opencode.log" || fail "プロンプトに OpenCode 向けの読み替えを足していない"
 grep -q '完了語を検知しました' "$LOG_107" || fail "周回のログに、完了語の検知を書いていない"
-grep -Fq '<promise>SMOKE DONE</promise>' "$LOG_107" || fail "周回のログに promise を復号して書いていない（見張り役がここから読む）"
+grep -Fq '<promise>SMOKE DONE</promise>' "$LOG_107" || fail "周回のログに、完了を検知したときの promise を書いていない（見張り役がここから読む）"
+[[ "$(grep -cF '<promise>SMOKE DONE</promise>' "$LOG_107" || true)" -eq 1 ]] || fail "周回のログの promise は、完了を検知した 1 行だけにしていない: $(grep -nF 'promise' "$LOG_107")"
+grep -qF '<promise:log>SMOKE DONE</promise>' "$LOG_107" || fail "モデルのメッセージの promise を、ログではタグを崩して書いていない"
 grep -qx 'permission_mode=auto' "$D107/.claude/askhub-manual.local.txt" || fail "権限モードの確認を飛ばして auto として記録していない"
 DENIES=$(jq '.permissions.deny | length' "$D107/.claude/settings.json")
 [[ "$(jq '.permissions | length' "$D107/.opencode/opencode.json")" -eq "$DENIES" ]] || fail "deny を OpenCode 形式に変換していない: $(jq '.permissions | length' "$D107/.opencode/opencode.json") 件"
@@ -727,6 +741,30 @@ wait_watch_exit "$D108"
 [[ "$(comment_count 108)" -eq 0 ]] || fail "Discussion が閉じたのに、OpenCode のループのコメントを消していない"
 cp "$WORK/plugin-settings.before" "$HOME/.claude/settings.json"
 ok "OpenCode が失敗し続けると state を残して止まり、resume で続きから回して見張り役が最終 PR を作る"
+
+# ループが完了語を出さずに終わったとき（モデル自身が state を消したときなど）は、途中のメッセージの promise が
+# あっても最終 PR を作らない（見張り役はログの promise で最終 PR を作るか決めるため）
+manual start 109 epic/opencode-three >/dev/null 2>&1 || fail "3 つ目の OpenCode 用の手動ループを start できない"
+D109="$WORK/repos/myapp-ralph-d109-ctl"
+perl -pi -e 's/\{\{[A-Z_]+\}\}/X/g' "$D109/.claude/ralph-playbook.local.md"
+printf '# ゴール\n\n- [ ] 【FEAT】OpenCode の途中の promise テスト | label: enhancement\n' > "$D109/.claude/ralph-goal.local.md"
+: > "$WORK/gh.log"
+: > "$WORK/opencode.log"
+OUT=$(ASKHUB_AGENT=opencode ASKHUB_OPENCODE_MAX_FAILS=3 ASKHUB_OPENCODE_FAIL_SLEEP=0 \
+  STUB_OPENCODE_STRAY=1 STUB_OPENCODE_LOG="$WORK/opencode.log" manual launch 109 "SMOKE DONE") || fail "OpenCode の launch が失敗した: $OUT"
+LOG_109=$(loop_log "$D109")
+wait_watch "$LOG_109"
+grep -q 'state ファイルが消えています' "$LOG_109" || fail "state が消えたのに周回をやめていない: $(cat "$LOG_109")"
+grep -q '注意: promise は出ていますが、最後のメッセージではありません' "$LOG_109" || fail "最後のメッセージ以外の promise に気づいていない: $(cat "$LOG_109")"
+! grep -qF '<promise>SMOKE DONE</promise>' "$LOG_109" || fail "途中のメッセージの promise が、そのままログに残っている（見張り役が誤って最終 PR を作る）: $(grep -nF 'promise' "$LOG_109")"
+grep -qF '<promise:log>SMOKE DONE</promise>' "$LOG_109" || fail "途中のメッセージの promise を、ログではタグを崩して書いていない"
+grep -q '完了語を出さずに終わった' "$LOG_109" || fail "見張り役が、完了語を出さずに終わったループとして扱っていない: $(cat "$LOG_109")"
+grep -q '^pr create' "$WORK/gh.log" && fail "完了語を出さずに終わったのに、最終 PR を作った"
+[[ ! -e "$D109/.claude/ralph-loop.local.md" ]] || fail "state を消したのに残っている"
+touch "$GH_STATE/closed-109"
+wait_watch_exit "$D109"
+[[ "$(comment_count 109)" -eq 0 ]] || fail "Discussion が閉じたのに、OpenCode のループのコメントを消していない"
+ok "ループが完了語を出さずに終わったときは、途中のメッセージの promise がログにあっても、見張り役は最終 PR を作らない"
 
 # ASKHUB_AGENT の値が分からないときは起動せずに断る（書き間違いで Claude のループを起動しない）
 if ASKHUB_AGENT=bogus manual launch 108 "SMOKE DONE" >"$WORK/bogus.out" 2>&1; then fail "ASKHUB_AGENT の知らない値で起動した"; fi
