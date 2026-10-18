@@ -19,6 +19,7 @@ bin/
   ralph-start.sh                state ファイルを生成する（＝ループ開始）
   ralph-stop.sh                 停止と後片付け
   askhub-manual.sh              手動ループ（担当者の Mac で回す）の準備・起動・状態の書き出し・最終 PR・終了
+  opencode-loop.sh              手動ループを OpenCode で回す（ASKHUB_AGENT=opencode のとき、launch が起動する）
 shim/                           各リポジトリに置くファイルの原本（install.sh が配る）
 install.sh                      リポジトリに中継を入れる・ずれを確かめる
 .github/workflows/
@@ -54,7 +55,7 @@ install.sh                      リポジトリに中継を入れる・ずれを
 - タグ・ブランチは 5 分おきに取り直す（`RALPH_KIT_FETCH_INTERVAL`）。取得できないとき・ほかのプロセスの取得が 2 分を超えて終わらないときは、手元にある版で動く
 - **中継（`scripts/ralph-kit.sh`）の処理も kit の版に従う。** 取得した kit の `shim/scripts/ralph-kit.sh` が各リポジトリのものと違えば、処理をそちらに任せる。
   各リポジトリのコピーが使われるのは、kit の取得と、任せるかどうかの判定だけになる
-- **ループは起動したときの版の kit を使い続ける。** `askhub-manual.sh launch` / `resume` は、起動する claude に
+- **ループは起動したときの版の kit を使い続ける。** `askhub-manual.sh launch` / `resume` は、起動するループ（claude / opencode）に
   `RALPH_KIT_DIR`（取得した kit の場所）を渡すので、周回中に呼ぶ `scripts/askhub-manual.sh status` も同じ版を使う。新しい版は次の起動から効く
 - 互換を崩す変更（中継・`kit.conf`・ワークフローの呼び出しの形を変えるもの）は `v2` にし、各リポジトリの `kit.conf` を書き換える
 - **制御用 worktree の playbook は、起動のたび（`ralph-start.sh`。launch・resume・オーケストレーターの起動）に kit の更新を取り込む。**
@@ -244,7 +245,8 @@ promise は完全一致でしか成立せず「詰まった」を表現できな
 
 ### 手で回す（manual-loop）
 
-担当 PC のオーケストレーターに任せず、**担当者が自分の Mac と Claude アカウントでループを回す**のが手動ループ。
+担当 PC のオーケストレーターに任せず、**担当者が自分の Mac でループを回す**のが手動ループ（ループの実行エージェントは既定で Claude Code。
+OpenCode でも回せる。下の「OpenCode で回す」）。
 AskHub の回答画面で、最後の質問を「投稿したら、回答を確定してループを始める」の回し方「手動で回す」にし、担当者を選んで投稿すると、
 Discussion に `manual-loop` と担当のコメント（`<!-- ask-hub:manual-assignee login="…" -->`。担当者を @メンションするので通知が届く）が付く。
 **信用する author（このリポジトリに書き込み権限を持つ人）の Discussion に付いたときだけ効く。** 担当者は、担当のコメントのうち最後のもの。
@@ -284,10 +286,11 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
 2. 制御用 worktree の playbook の `{{...}}` を埋め（`TRUSTED_AUTHORS`・`WORKTREE_*` は start が表示した値）、STEP A に沿って goal を作る
    （Discussion の、信用する author の本文・コメント・返信だけを使う）。検証コマンドの `-derivedDataPath` などスロットごとの場所は、
    スロットのパスから作る（同じリポジトリのほかのループのスロットと共有しない）
-3. `scripts/askhub-manual.sh launch <N> "<完了語>"`。制御用 worktree で `claude -p` のループをバックグラウンドで起動する
-   （`launch` が、起動の前に実際に効く権限モードを自動で確かめる。`bypassPermissions` が使えればそれで起動し、
+3. `scripts/askhub-manual.sh launch <N> "<完了語>"`。制御用 worktree でループをバックグラウンドで起動する。
+   既定は `claude -p` で、`launch` が、起動の前に実際に効く権限モードを自動で確かめる（`bypassPermissions` が使えればそれで起動し、
    MDM や組織の管理設定で禁止された Mac（エラーにならずにすべての操作が拒否されてループが進まない）では `auto` モードで起動する。
-   どちらも使えなければ、理由を出して起動しない。担当者が手で確かめたり選んだりする必要はない）
+   どちらも使えなければ、理由を出して起動しない。担当者が手で確かめたり選んだりする必要はない）。
+   `ASKHUB_AGENT=opencode` のときは、この確認をせずに OpenCode（`opencode run --auto`）で起動する（下の「OpenCode で回す」）。
    （指示を受けた会話そのものはループにならない。ログは `~/Library/Logs/askhub/manual/`）
    あわせて、ループの終了を待つ見張り役（シェル）を裏で起動する（下の 6）。`resume` も同じ
 4. 周回中は、playbook の STEP D が制御用 worktree の中で `scripts/askhub-manual.sh status` を呼び（番号は要らない）、ループの状態を書き手 `manual`・回している人つきで書く（10 分に 1 回まで）。
@@ -324,6 +327,27 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    Discussion が open で `manual-loop` が付いたままだと、AskHub の「手動ループ」には「未開始」と開始の指示が出るので、やめるなら Discussion を閉じる
 
 ask・判断ログ（`decision-log`）・実機確認（`needs-verify`）の書き方は自動のときと同じ（AskHub の受信箱でそのまま扱える）。
+
+#### OpenCode で回す
+
+担当 Mac のシェル（`~/.zshrc` など）で次を設定すると、`launch` / `resume` が `claude -p` の代わりに
+`bin/opencode-loop.sh`（OpenCode の CLI を周回させる）でループを起動する。既定は今までどおり Claude Code で、自動ループ（オーケストレーター）は変わらない:
+
+```bash
+export ASKHUB_AGENT=opencode
+export ASKHUB_OPENCODE_MODEL=opencode/deepseek-v4.1-flash-free   # 使うモデル（省略時は OpenCode の既定）
+# export ASKHUB_OPENCODE=/Applications/OpenCode.app/Contents/Resources/opencode-cli  # 実行ファイル（省略時: PATH → OpenCode.app）
+```
+
+AskHub からコピーして Claude Code に貼る指示は、今までどおりそのまま使える（貼る先の Claude Code は段取りだけを行い、ループ本体が OpenCode で回る）。
+
+- 権限モードの確認（`claude` の起動）は行わず、常に `opencode run --auto` で起動する。`--auto` でも明示された deny は常に優先される
+- 制御用 worktree の `.claude/settings.json` の deny（`Bash(…)`・`Read(…)`・`Edit(…)` など。`ralph-setup.sh` が置く）は、
+  起動のたびに `.opencode/opencode.json` に変換して置く（リポジトリにはコミットしない）
+- playbook の Claude Code 向けの記述（Stop hook・Agent ツールなど）は、起動時に OpenCode 向けの読み替えをプロンプトへ足して渡す
+- 周回は 1 つの OpenCode セッションで続く（OpenCode の一覧に `ralph d<N>（OpenCode）` で出る）。モデルは前の周の続きから作業する
+- state・ログ・PID・見張り役（`watch-final`）・`status`・`resume`・`final`・`end`・`ralph-stop.sh` は Claude のときと同じように動く
+- 連続失敗で止まる（既定 5 回。`ASKHUB_OPENCODE_MAX_FAILS` で変更）。再試行の待ち時間は `ASKHUB_OPENCODE_FAIL_SLEEP`（既定 15 秒 × 失敗回数）
 
 #### 作業場所
 
