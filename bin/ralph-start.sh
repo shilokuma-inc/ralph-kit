@@ -9,6 +9,9 @@ set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
       GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
 
+# ループの実行エージェント（askhub-manual.sh launch が渡す）。opencode のときは ralph-loop プラグインを使わない
+AGENT="${ASKHUB_AGENT:-claude}"
+
 PROMISE="${1:-}"
 MAX="${2:-0}"
 # "00" が 0 判定をすり抜けたり、"abc" が Stop hook に弾かれる state を書くのを防ぐ
@@ -101,24 +104,29 @@ if [[ "$MAX" -eq 0 ]]; then
   fi
 fi
 
-# 周回は ralph-loop プラグインの Stop hook が回す。プラグインが無いと 1 周目で黙って終わるので、state を作る前に止める
-RALPH_PLUGIN="ralph-loop@claude-plugins-official"
-command -v jq >/dev/null 2>&1 || { echo "jq が見つかりません（brew install jq で入れてください）" >&2; exit 1; }
-ralph_plugin_enabled() {
-  local settings
-  # Claude Code と同じく、優先度の高い設定（ローカル → プロジェクト → ユーザー）から見て、
-  # このプラグインの値を最初に持つファイルで決める（上位の false を下位の true で覆さない）
-  for settings in ".claude/settings.local.json" ".claude/settings.json" "$HOME/.claude/settings.json"; do
-    [[ -f "$settings" ]] || continue
-    if jq -e --arg plugin "$RALPH_PLUGIN" '.enabledPlugins | has($plugin)' "$settings" >/dev/null 2>&1; then
-      jq -e --arg plugin "$RALPH_PLUGIN" '.enabledPlugins[$plugin] == true' "$settings" >/dev/null 2>&1
-      return
-    fi
-  done
-  return 1
-}
-ralph_plugin_enabled \
-  || { echo "Claude Code の ${RALPH_PLUGIN} が有効になっていません（claude plugin install ${RALPH_PLUGIN} で入れてください）" >&2; exit 1; }
+# 周回は、既定（claude）では ralph-loop プラグインの Stop hook が回す。プラグインが無いと 1 周目で黙って終わるので、state を作る前に止める。
+# ASKHUB_AGENT=opencode のときは bin/opencode-loop.sh が周回させるので、プラグインは要らない
+[[ "$AGENT" == claude || "$AGENT" == opencode ]] \
+  || { echo "ASKHUB_AGENT の値が分かりません: ${AGENT}（claude か opencode）" >&2; exit 1; }
+if [[ "$AGENT" == claude ]]; then
+  RALPH_PLUGIN="ralph-loop@claude-plugins-official"
+  command -v jq >/dev/null 2>&1 || { echo "jq が見つかりません（brew install jq で入れてください）" >&2; exit 1; }
+  ralph_plugin_enabled() {
+    local settings
+    # Claude Code と同じく、優先度の高い設定（ローカル → プロジェクト → ユーザー）から見て、
+    # このプラグインの値を最初に持つファイルで決める（上位の false を下位の true で覆さない）
+    for settings in ".claude/settings.local.json" ".claude/settings.json" "$HOME/.claude/settings.json"; do
+      [[ -f "$settings" ]] || continue
+      if jq -e --arg plugin "$RALPH_PLUGIN" '.enabledPlugins | has($plugin)' "$settings" >/dev/null 2>&1; then
+        jq -e --arg plugin "$RALPH_PLUGIN" '.enabledPlugins[$plugin] == true' "$settings" >/dev/null 2>&1
+        return
+      fi
+    done
+    return 1
+  }
+  ralph_plugin_enabled \
+    || { echo "Claude Code の ${RALPH_PLUGIN} が有効になっていません（claude plugin install ${RALPH_PLUGIN} で入れてください）" >&2; exit 1; }
+fi
 
 RESUME_NOTE=""
 if [[ "$TASKS" -eq 0 ]]; then
@@ -146,11 +154,17 @@ STATE_EOF
 
 echo "未完了タスク $TASKS 件 / 上限 $([[ "$MAX" -eq 0 ]] && echo '無制限' || echo "$MAX") / 完了語 $PROMISE"
 echo
-echo "注意: この制御用 worktree の中で、ほかの Claude Code セッションを開いたり cd したりしないこと。"
-echo "      Stop hook に捕まり、そのセッションがループ本体として扱われる。"
-echo
-echo "起動コマンド（スロットのパスは環境に合わせて調整）:"
-echo "  claude --add-dir ../\$(basename \$PWD | sed 's/-ctl\$/-a/') \\"
-echo "         --add-dir ../\$(basename \$PWD | sed 's/-ctl\$/-b/') \\"
-echo "         --permission-mode bypassPermissions \\"
-echo "         \"\$(sed -n '/^---\$/,/^---\$/!p' $STATE | sed '/^\$/d' | head -20)\""
+if [[ "$AGENT" == opencode ]]; then
+  echo "この制御用 worktree のループは、askhub-manual.sh launch が OpenCode（bin/opencode-loop.sh）で起動する。"
+  echo "手で起動するとき:"
+  echo "  (cd \"\$PWD\" && \"$KIT_DIR/bin/opencode-loop.sh\" \"$PROMISE\")"
+else
+  echo "注意: この制御用 worktree の中で、ほかの Claude Code セッションを開いたり cd したりしないこと。"
+  echo "      Stop hook に捕まり、そのセッションがループ本体として扱われる。"
+  echo
+  echo "起動コマンド（スロットのパスは環境に合わせて調整）:"
+  echo "  claude --add-dir ../\$(basename \$PWD | sed 's/-ctl\$/-a/') \\"
+  echo "         --add-dir ../\$(basename \$PWD | sed 's/-ctl\$/-b/') \\"
+  echo "         --permission-mode bypassPermissions \\"
+  echo "         \"\$(sed -n '/^---\$/,/^---\$/!p' $STATE | sed '/^\$/d' | head -20)\""
+fi
