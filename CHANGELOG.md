@@ -3,6 +3,19 @@
 各アプリのリポジトリは `.claude/ralph/kit.conf` の `ref=v1` で、v1 の最新を使う（`VERSION` を上げた PR が main に入ると、`release.yml` が `v1` を動かす）。
 互換を崩す変更（各リポジトリの中継・`kit.conf`・ワークフローの呼び出しの形を変える必要があるもの）は v2 にする。
 
+## 1.6.0（2026-10-18）
+
+手動ループを、Claude Code の代わりに OpenCode でも回せるようにした（既定は今までどおり Claude Code。オーケストレーターは変わらない）。
+
+- 担当 Mac のシェルで `ASKHUB_AGENT=opencode` を設定すると、`launch` / `resume` が `claude -p` の代わりに `bin/opencode-loop.sh` でループを起動する
+  （実行ファイルは `ASKHUB_OPENCODE`、モデルは `ASKHUB_OPENCODE_MODEL` で指定。省略時は PATH → OpenCode.app、モデルは OpenCode の既定）
+- `opencode-loop.sh` は state を毎周読み直して `opencode run --auto` を回し、最後のメッセージで `<promise>完了語</promise>` を検知したら state を消す。
+  見張り役（`watch-final`）・`final`・`status`・`resume`・`end`・`ralph-stop.sh` は Claude のときと同じように動く
+- 権限モードの確認（`claude` の起動）は行わない。制御用 worktree の `.claude/settings.json` の deny は、起動のたびに `.opencode/opencode.json` に変換して置く（コミットしない）
+- 起動時に渡すプロンプトに、OpenCode 向けの読み替え（サブエージェント・シェルの作業ディレクトリなど）を足す
+- `ralph-start.sh` は、`ASKHUB_AGENT=opencode` のとき ralph-loop プラグインの確認をしない
+- 連続で失敗したときは止まる（既定 5 回。`ASKHUB_OPENCODE_MAX_FAILS` で変更）。再試行の待ち時間は `ASKHUB_OPENCODE_FAIL_SLEEP`（既定 15 秒 × 失敗回数）
+
 ## 1.5.0（2026-10-17）
 
 第三者としてのセルフレビューのコメントを、人が一目で読めるようにした。
