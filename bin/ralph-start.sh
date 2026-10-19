@@ -74,10 +74,10 @@ if [[ -n "$LEFTOVER" ]]; then
 fi
 
 TASKS=$(grep -c '^- \[ \]' "$GOAL" || true)
-# 仮決め一覧への指示による再開（askhub-start-loop が ASKHUB_RESUME_REASON=decision-log を渡す）では、
-# 指示はループが周回の最初（B-0）に読んで修正タスクにする。epic の完了後に付いた指示ではタスクが残っていないので、0 件でも起動する
+# 仮決め一覧・最終 PR への指示による再開（askhub-start-loop が ASKHUB_RESUME_REASON=decision-log / final-pr を渡す）では、
+# 指示はループが周回の最初（B-0・B-0b）に読んで修正タスクにする。epic の完了後に付いた指示ではタスクが残っていないので、0 件でも起動する
 RESUME_REASON="${ASKHUB_RESUME_REASON:-}"
-if [[ "$TASKS" -eq 0 && "$RESUME_REASON" != "decision-log" ]]; then
+if [[ "$TASKS" -eq 0 && "$RESUME_REASON" != "decision-log" && "$RESUME_REASON" != "final-pr" ]]; then
   echo "$GOAL に未完了タスクがありません" >&2
   exit 1
 fi
@@ -129,9 +129,13 @@ if [[ "$AGENT" == claude ]]; then
 fi
 
 RESUME_NOTE=""
-if [[ "$TASKS" -eq 0 ]]; then
-  RESUME_NOTE="未完了タスクは 0 件だが、判断ログ Issue（仮決め一覧）への指示を処理するために再開した。
-STEP B-0 で指示を読んで修正タスクにしてから、STEP D の終了判定に進むこと。"
+if [[ "$TASKS" -eq 0 && "$RESUME_REASON" == "final-pr" ]]; then
+  RESUME_NOTE="未完了タスクは 0 件だが、最終 PR への指示を処理するために再開した。
+STEP B-0b で指示を読んで修正タスクにしてから、STEP D の終了判定に進むこと。"
+elif [[ "$TASKS" -eq 0 ]]; then
+  # オーケストレーターの起動スクリプト（ask-hub-apple の askhub-start-loop）は、最終 PR への指示による再開も decision-log で渡す
+  RESUME_NOTE="未完了タスクは 0 件だが、判断ログ Issue（仮決め一覧）か最終 PR への指示を処理するために再開した。
+STEP B-0 と B-0b で指示を読んで修正タスクにしてから、STEP D の終了判定に進むこと。"
 fi
 
 cat > "$STATE" <<STATE_EOF
