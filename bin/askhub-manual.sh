@@ -20,7 +20,8 @@
 #   3. launch: 完了語を記録し、ralph-start.sh で state を作り、制御用 worktree でループをバックグラウンドで起動する。
 #              既定は claude -p（bypassPermissions で起動する。MDM などで禁止された Mac では auto モード。どちらも使えなければ起動しない）。
 #              ASKHUB_AGENT=opencode のときは bin/opencode-loop.sh（opencode run --auto）で起動する（README の「OpenCode で回す」を参照）
-#              あわせて見張り役（watch-final）を裏で起動し、ループが完了語を出して終わったら final を流す（ASKHUB_AUTO_FINAL=0 なら流さない）
+#              あわせて見張り役（watch-final）を裏で起動し、ループが完了語を出して終わったら final を流す（ASKHUB_AUTO_FINAL=0 なら流さない）。
+#              ループが Claude の利用上限で止まったら、見張り役が解除の時刻まで待って resume で再開する（ASKHUB_AUTO_RESUME=0 なら再開しない）
 #   4. status: ループの状態を、状態用の Issue のこのループのコメントに、書き手 manual・回している人つきで書く（playbook の STEP D から呼ぶ。10 分に 1 回まで）
 #   5. resume: 回答が付いた後などに、記録した完了語でループを起動し直す（launch と同じく見張り役も起動する）
 #   6. final:  ループが終わったら、ゴール元の目印つきの最終 PR（epic-final）を作る。制御用 worktree の外から呼ぶ
@@ -64,6 +65,8 @@ RECORD=".claude/askhub-manual.local.txt"
 LOG_DIR="${ASKHUB_LOG_DIR:-$HOME/Library/Logs/askhub/manual}"
 BASE_BRANCH="${ASKHUB_BASE_BRANCH:-develop}"
 STATUS_INTERVAL=600
+# Claude の利用上限で止まったループを、解除の時刻の何秒後に再開するか（解除の直後はまだ上限に当たることがあるので、少し空ける）
+USAGE_LIMIT_MARGIN="${ASKHUB_USAGE_LIMIT_MARGIN:-60}"
 
 REPOSITORY=$(cd "$MAIN" && gh repo view --json nameWithOwner --jq .nameWithOwner) || fail "GitHub のリポジトリを特定できません（gh auth status を確認してください）"
 OWNER="${REPOSITORY%%/*}"
@@ -235,6 +238,8 @@ iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # BSD を先にすると Linux や、PATH の先に coreutils がある Mac で数字でない値になる（macOS の date・stat は GNU の -d・-c を拒む）
 iso_of() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ; }
 mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+# UNIX 時刻を、この Mac のタイムゾーンの時刻にする（ログに書く用。iso_of と同じく GNU の書き方を先に試す）
+local_time_of() { date -d "@$1" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$1" '+%Y-%m-%d %H:%M'; }
 
 count_lines() { grep -c -E "$1" "$2" 2>/dev/null || true; }
 
@@ -243,7 +248,13 @@ compute_state() {
   local stopping="$1" waiting="$2" open
   open=$(grep -E '^- \[ \]' "$GOAL" 2>/dev/null | grep -vc '※回答待ち' || true)
   if [[ "$stopping" != true && -f "$LOOP_STATE" ]]; then
-    if loop_alive; then echo running; else echo gave-up; fi
+    if loop_alive; then
+      echo running
+    elif usage_limited_until >/dev/null; then
+      echo usage-limited
+    else
+      echo gave-up
+    fi
   elif [[ "$open" -gt 0 ]]; then
     echo waiting-to-start
   elif [[ -n "$waiting" ]]; then
@@ -253,9 +264,20 @@ compute_state() {
   fi
 }
 
+# 見張り役が Claude の利用上限の解除を待っているなら、解除の時刻（UNIX 時刻）を出す。
+# 再開する時刻（解除の時刻 + USAGE_LIMIT_MARGIN）を過ぎたら待っていない（見張り役が動いていなかったときに、待機中と出し続けない）
+usage_limited_until() {
+  local limited
+  limited=$(state_get usage_limited_until)
+  [[ "$limited" =~ ^[0-9]+$ ]] || return 1
+  (( limited + USAGE_LIMIT_MARGIN > $(date +%s) )) || return 1
+  echo "$limited"
+}
+
 state_title() {
   case "$1" in
     running) echo "実行中" ;;
+    usage-limited) echo "上限で待機中" ;;
     waiting-for-answer) echo "回答待ち" ;;
     waiting-to-start) echo "開始待ち" ;;
     gave-up) echo "異常終了（再開を諦めた）" ;;
@@ -266,7 +288,7 @@ state_title() {
 
 write_status() {
   local stopping="${1:-false}" force="${2:-false}"
-  local discussion epic runner waiting state total completed deferred last checked marker body signature now
+  local discussion epic runner waiting state total completed deferred last checked marker body signature now limited="" limited_row=""
   discussion=$(state_get discussion)
   epic=$(state_get epic)
   runner=$(state_get runner)
@@ -282,10 +304,11 @@ write_status() {
     return 0
   fi
   state=$(compute_state "$stopping" "$waiting")
+  if [[ "$state" == usage-limited ]]; then limited=$(usage_limited_until || true); fi
   total=$(count_lines '^- \[[ x]\]' "$GOAL")
   completed=$(count_lines '^- \[x\]' "$GOAL")
   deferred=$(count_lines '^- \[x\].*※保留' "$GOAL")
-  signature="$state|$completed/$total/$deferred|$waiting"
+  signature="$state|$completed/$total/$deferred|$waiting|$limited"
   now=$(date +%s)
   local written
   written=$(state_get status_written_at)
@@ -298,8 +321,11 @@ write_status() {
   if [[ "$last" -gt 0 ]]; then marker="$marker,\"lastActivityAt\":\"$(iso_of "$last")\""; fi
   if [[ "$total" -gt 0 ]]; then marker="$marker,\"progress\":{\"completed\":$completed,\"deferred\":$deferred,\"total\":$total}"; fi
   marker="$marker,\"runner\":\"$runner\",\"state\":\"$state\""
+  if [[ -n "$limited" ]]; then marker="$marker,\"usageLimitedUntil\":\"$(iso_of "$limited")\""; fi
   if [[ -n "$waiting" ]]; then marker="$marker,\"waitingPullRequests\":[$waiting]"; fi
   marker="$marker,\"writer\":\"manual\"}"
+  # オーケストレーターの書く表と同じく、上限で待機しているときだけ、回答待ちの PR の前に解除の時刻の行を足す
+  if [[ -n "$limited" ]]; then limited_row="| 上限の解除 | $(iso_of "$limited") |"$'\n'; fi
   body=$(cat <<BODY
 <!-- ask-hub:loop-status $marker -->
 ## ループの状態（Discussion #${discussion}）
@@ -314,7 +340,7 @@ write_status() {
 | epic | $epic |
 | ゴール元 | Discussion #$discussion |
 | 進捗 | $completed / $total タスク完了 |
-| 回答待ちの PR | ${waiting:-なし} |
+${limited_row}| 回答待ちの PR | ${waiting:-なし} |
 | 確認時刻 | $checked |
 BODY
 )
@@ -624,6 +650,8 @@ launch_loop_opencode() {
   state_set permission_mode auto
   # end で終えたループを起動し直したら、終えた記録を外す（見張り役が、Discussion が閉じたらまたコメントを消せるように）
   state_unset ended_at
+  # 利用上限の解除を待っていたループを起動し直したら（解除の後の再開・担当者の resume）、待機の記録を外す
+  state_unset usage_limited_until
   echo "ループを起動しました（PID $(cat "$PID_FILE")、実行エージェント: OpenCode、ログ: ${log}）"
   echo "進み具合を見るには: tail -f \"${log}\""
   start_final_watch "$(tr -d '[:space:]' < "$PID_FILE")" "$log"
@@ -678,6 +706,8 @@ launch_loop() {
   state_set permission_mode "$permission_mode"
   # end で終えたループを起動し直したら、終えた記録を外す（見張り役が、Discussion が閉じたらまたコメントを消せるように）
   state_unset ended_at
+  # 利用上限の解除を待っていたループを起動し直したら（解除の後の再開・担当者の resume）、待機の記録を外す
+  state_unset usage_limited_until
   echo "ループを起動しました（PID $(cat "$PID_FILE")、権限モード: ${permission_mode}、ログ: ${log}）"
   echo "進み具合を見るには: tail -f \"$log\""
   start_final_watch "$(tr -d '[:space:]' < "$PID_FILE")" "$log"
@@ -739,6 +769,56 @@ watch_until_closed() {
       noted=true
     fi
   done
+}
+
+# 見張り役: ループが Claude の利用上限で止まったら、解除の時刻（$1。UNIX 時刻）まで待ってから resume で再開する（オーケストレーターの自動ループと同じ）。
+# 待っている間は、ループの状態を「上限で待機中」で書く。担当者が resume で別のループを起動した・end で終えたら、何もせずに終わる（そちらに任せる）。
+# ralph-stop.sh で止めた（state ファイルを消した）・記録が消えた・ゴール元の Discussion が閉じた・再開できなかったときは 1 を返す
+# （呼び出し側は、Discussion が閉じるのを待つ）。再開したら 0 を返す（このループの見張りは、新しいループの見張り役に任せる）
+resume_after_usage_limit() {
+  local reset="$1" resume_at pid
+  resume_at=$(( reset + USAGE_LIMIT_MARGIN ))
+  state_set usage_limited_until "$reset"
+  watch_note "ループが Claude の利用上限で止まりました。解除の時刻（$(local_time_of "$reset")）の後に、自動で再開します（再開させないなら scripts/askhub-manual.sh end ${LOOP_DISCUSSION}）"
+  write_status false true
+  while :; do
+    pid=$({ tr -d '[:space:]' < "$PID_FILE"; } 2>/dev/null || true)
+    if [[ -n "$pid" && "$pid" != "$WATCHED" ]]; then
+      watch_note "別のループが起動しているため、自動では再開しません"
+      exit 0
+    fi
+    if [[ -n "$(state_get ended_at)" ]]; then
+      watch_note "end で終えたため、自動では再開しません"
+      exit 0
+    fi
+    # 作業場所を消したなど。記録を作り直さないよう、状態は書かない
+    if [[ "$(state_get discussion)" != "$LOOP_DISCUSSION" ]]; then
+      watch_note "手動ループの記録が無くなったため、自動では再開しません"
+      return 1
+    fi
+    if [[ ! -f "$LOOP_STATE" ]]; then
+      watch_note "ループが止められた（state ファイルが無い）ため、自動では再開しません（続けるなら scripts/askhub-manual.sh resume ${LOOP_DISCUSSION}）"
+      state_unset usage_limited_until
+      write_status false true
+      return 1
+    fi
+    (( $(date +%s) < resume_at )) || break
+    # Mac のスリープ中は sleep の時間が進まないので、解除の時刻まで一度に寝ず、短い間隔で時刻を確かめる
+    sleep "${ASKHUB_USAGE_LIMIT_INTERVAL:-60}"
+  done
+  state_unset usage_limited_until
+  if [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" == true ]]; then
+    watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じているため、自動では再開しません"
+    return 1
+  fi
+  watch_note "Claude の利用上限の解除の時刻を過ぎたので、ループを再開します"
+  # resume は新しいループと、その見張り役を起動する
+  if (cd "$MAIN" && "$KIT_DIR/bin/askhub-manual.sh" resume "$LOOP_DISCUSSION"); then
+    return 0
+  fi
+  watch_note "ループを自動で再開できませんでした（上のエラーを確かめて、scripts/askhub-manual.sh resume $LOOP_DISCUSSION を手で流してください）"
+  write_status false true
+  return 1
 }
 
 # ---- サブコマンド --------------------------------------------------------------------------
@@ -865,6 +945,7 @@ NEXT
   watch-final)
     # launch / resume が裏で起動する見張り役（担当者は呼ばない）。ループのプロセスが終わるのを待ち、
     # ループが完了語の promise を出して終わったときだけ final を流す（自動ループと同じく、異常終了したものには作らない）。
+    # Claude の利用上限で止まったときは、解除の時刻まで待って resume で再開する（ASKHUB_AUTO_RESUME=0 なら再開しない）。
     # そのあと、ゴール元の Discussion が閉じるのを待って、このループのコメントを消す（promise を出さずに終わったときも。Discussion を閉じてやめたときに残さない）
     [[ "${1:-}" =~ ^[0-9]+$ && "${2:-}" =~ ^[0-9]+$ && -n "${3:-}" ]] || usage
     resolve_loop "$1"
@@ -887,7 +968,18 @@ NEXT
     # 残っていれば promise を出さずに終わった（API のエラーなどの異常終了）。
     # ralph-stop.sh で止めたとき・無進捗で止まったときも state ファイルは消えるので、ループの最後の出力（ログ）の promise でも確かめる
     PROMISE=$(state_get promise)
-    if [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
+    # state ファイルが残り、ログの末尾が Claude の利用上限のメッセージなら、上限で止まった（解除の時刻は bin/usage-limit.sh が読む）
+    RESET=""
+    if [[ -f "$LOOP_STATE" ]]; then
+      RESET=$("$KIT_DIR/bin/usage-limit.sh" "$WATCHED_LOG" 2>/dev/null) || RESET=""
+    fi
+    if [[ -n "$RESET" && "${ASKHUB_AUTO_RESUME:-1}" != 0 ]]; then
+      if resume_after_usage_limit "$RESET"; then
+        exit 0
+      fi
+    elif [[ -n "$RESET" ]]; then
+      watch_note "ループが Claude の利用上限で止まりました。ASKHUB_AUTO_RESUME=0 のため、自動では再開しません（解除の時刻（$(local_time_of "$RESET")）の後に scripts/askhub-manual.sh resume ${LOOP_DISCUSSION}）"
+    elif [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
       : # 最終 PR は担当者が final で作る
     elif [[ -f "$LOOP_STATE" || -z "$PROMISE" ]] || ! grep -Fq "<promise>$PROMISE</promise>" "$WATCHED_LOG" 2>/dev/null; then
       watch_note "ループが完了語を出さずに終わったため、最終 PR は作りません（続けるなら scripts/askhub-manual.sh resume ${LOOP_DISCUSSION}）"
