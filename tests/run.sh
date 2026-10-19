@@ -366,9 +366,14 @@ ok "衝突したとき・新しいプレースホルダが入るときは取り�
 printf '# ゴール\n\n- [x] 【FEAT】テスト | label: enhancement\n' > "$CTL/.claude/ralph-goal.local.md"
 if (cd "$CTL" && ../myapp-ios/scripts/ralph-start.sh "SMOKE DONE" >/dev/null 2>&1); then fail "未完了タスクが 0 件なのに起動した"; fi
 (cd "$CTL" && ASKHUB_RESUME_REASON=decision-log ../myapp-ios/scripts/ralph-start.sh "SMOKE DONE" >/dev/null) || fail "decision-log の再開で起動しない"
-grep -q '判断ログ Issue（仮決め一覧）への指示を処理するために再開した' "$CTL/.claude/ralph-loop.local.md" || fail "再開の理由を state に書いていない"
+grep -q '判断ログ Issue（仮決め一覧）か最終 PR への指示を処理するために再開した' "$CTL/.claude/ralph-loop.local.md" || fail "再開の理由を state に書いていない"
 (cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh >/dev/null)
 ok "decision-log の再開では、未完了タスクが 0 件でも起動する"
+(cd "$CTL" && ASKHUB_RESUME_REASON=final-pr ../myapp-ios/scripts/ralph-start.sh "SMOKE DONE" >/dev/null) || fail "final-pr の再開で起動しない"
+grep -q '最終 PR への指示を処理するために再開した' "$CTL/.claude/ralph-loop.local.md" || fail "最終 PR への指示による再開だと state に書いていない"
+grep -q 'STEP B-0b' "$CTL/.claude/ralph-loop.local.md" || fail "最終 PR への指示を読む手順を案内していない"
+(cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh >/dev/null)
+ok "final-pr の再開では、未完了タスクが 0 件でも起動し、最終 PR への指示を読むよう伝える"
 
 # 2 回目の setup（再開）は既存のファイルを上書きせず、スロットを作り直す
 (cd "$CTL" && ../myapp-ios/scripts/ralph-stop.sh --worktrees >/dev/null) || fail "ralph-stop.sh --worktrees が失敗した"
