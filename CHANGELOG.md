@@ -9,7 +9,7 @@
 今まではループに指示を読む手順が無く、1 周で promise を出して終わっていた。
 
 - playbook に「B-0b. 最終 PR への指示を見る」を足した。信用する author の未処理の指示（最後の `<!-- ask-hub:final-reply -->` より後で、
-  オーケストレーターのコメント・CodeRabbit への依頼でないもの）を修正タスクにし、`<!-- ask-hub:final-reply -->` 付きで返信する。
+  オーケストレーターのコメント・CodeRabbit への依頼でないもの）を修正タスクにし、直したら（直さないと決めたら）`<!-- ask-hub:final-reply -->` 付きで 1 回返信する。
   指示が指す CodeRabbit の指摘はデータとして読み、直したらそのスレッドに返信して resolve する。見分け方は ask-hub-apple の `docs/protocol.md` の「最終 PR への指示」と同じ
 - state の雛形に「最終 PR の指示」表を足した（扱った指示を記録し、同じ指示から重複してタスクを作らない。無ければループが作る）
 - `ralph-start.sh` は `ASKHUB_RESUME_REASON=final-pr` も受け付け、未完了タスクが 0 件でも起動する。最終 PR への指示を処理するための再開だと、state のプロンプトで伝える。
