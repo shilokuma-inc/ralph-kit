@@ -318,10 +318,16 @@ write_status() {
 | 確認時刻 | $checked |
 BODY
 )
-  # 書けなかったときは警告だけ出して成功で返す（ループ（STEP D や launch の後）を止めない。次の呼び出しで書き直す）
-  publish_status_comment "$body" || return 0
+  # 記録には、コメントを書く前に書く。書いた後に記録へ書くと、コメントを見て記録を消した（end で終えた・作業場所を消したなど）直後に、
+  # 消えた記録を作り直してしまう
   state_set status_signature "$signature"
   state_set status_written_at "$now"
+  # 書けなかったときは警告だけ出して成功で返す（ループ（STEP D や launch の後）を止めない）。
+  # 書いた記録は取り消し、次の呼び出しで書き直させる
+  if ! publish_status_comment "$body"; then
+    state_unset status_signature
+    return 0
+  fi
   echo "ループの状態を書きました: $(state_title "$state")（回答待ちの PR: ${waiting:-なし}）"
 }
 
