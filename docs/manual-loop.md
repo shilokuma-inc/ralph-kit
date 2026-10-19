@@ -11,7 +11,7 @@
 
 - **Claude Code**（担当者が開いているもの）: AskHub から貼られた指示を受けて段取りする（`start` → playbook → goal → `launch`）
 - **ループ本体**: `launch` がバックグラウンドで起動する。実行エージェントは既定で Claude Code、`ASKHUB_AGENT=opencode` を設定した Mac では OpenCode
-- **見張り役**: `launch` が同時に起動するシェル。ループの終了を待って最終 PR を作る
+- **見張り役**: `launch` が同時に起動するシェル。ループの終了を待って最終 PR を作る。Claude の利用上限で止まったときは、解除の時刻の後にループを再開する
 
 ## 0. 担当 Mac で 1 回だけやること
 
@@ -92,7 +92,14 @@ OpenCode のときの起動は、権限モードの確認（`claude` の起動�
 - 最終 PR の中身と CI を確認して**マージ**する
 - 元の Discussion を**閉じる**と、ループの状態コメントが片付く
 
-止まった（API エラーなど）・差し戻されたときは、ログや AskHub の知らせを見て直し、次の指示をコピーして貼る:
+**Claude の利用上限で止まったときは、何もしなくてよい。** 見張り役が解除の時刻の 1 分後に `resume` で再開する（自動ループと同じ）。
+待っている間、AskHub には「上限で待機中（〇時に再開）」と出て、ログには `[askhub-manual …] ループが Claude の利用上限で止まりました。解除の時刻（…）の後に、自動で再開します` が残る。
+
+- 待たずにやめるとき: `scripts/askhub-manual.sh end <N>`（制御用 worktree で `scripts/ralph-stop.sh` を流しても、再開しない）
+- 自動で再開させたくないとき: `ASKHUB_AUTO_RESUME=0` を付けて `launch` / `resume` する（ログに書くだけになる）
+- 待っている間に Mac を再起動したときは、見張り役も止まる。解除の後に下の指示で `resume` する
+
+ほかの理由で止まった（API エラーなど）・差し戻されたときは、ログや AskHub の知らせを見て直し、次の指示をコピーして貼る:
 
 ```
 <owner/repo> の Discussion #N の手動ループを再開して（scripts/askhub-manual.sh resume）
@@ -109,7 +116,7 @@ OpenCode のときの起動は、権限モードの確認（`claude` の起動�
 | `opencode の実行ファイルが見つかりません` | PATH に通すか `ASKHUB_OPENCODE` を設定する（省略時は OpenCode.app 内を探す） |
 | 設定したのに Claude Code で回る | そのターミナルで `echo "$ASKHUB_AGENT"` が `opencode` か、`scripts/ralph-kit.sh version` が 1.6.0 以降かを確認する（設定後はターミナルを開き直す） |
 | `ralph-loop@claude-plugins-official が有効になっていません` と言われて始まらない | Claude Code（既定）で回す人向け。`claude plugin install ralph-loop@claude-plugins-official` で入れる。OpenCode のつもりなら `ASKHUB_AGENT` の設定を確認する |
-| ループが止まっている | ログの末尾を確認し、`resume`（AskHub から指示をコピー） |
+| ループが止まっている | ログの末尾を確認し、`resume`（AskHub から指示をコピー）。Claude の利用上限で止まり「自動で再開します」とあれば、解除の時刻まで待つ |
 | 古い kit のまま | `v1` の取り直しは既定 5 分間隔。`RALPH_KIT_FETCH_INTERVAL=0 scripts/ralph-kit.sh version` |
 | 最終 PR が無い | 見張り役のメッセージ（ログ）を確認し、`final <N>` を手で流す |
 | 同じリポジトリで並べて回したい | そのままでよい。作業場所・状態コメントは Discussion ごとに分かれる |
