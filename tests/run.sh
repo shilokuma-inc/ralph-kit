@@ -879,6 +879,11 @@ limit_loop 112 epic/manual-twelve
 limit_launch 112 600
 LOG_112=$(loop_log "$D112")
 wait_for comment_has 112 '"state":"usage-limited"' || fail "利用上限で止まったのに、上限で待機中にしていない: $(cat "$LOG_112")"
+# 担当者の resume が state をよけて権限モードを確かめている間（.probe）は、止めたとみなさない
+mv "$D112/.claude/ralph-loop.local.md" "$D112/.claude/ralph-loop.local.md.probe"
+sleep 3
+grep -q 'ループが止められた' "$LOG_112" && fail "resume が state をよけている間に、ループが止められたとみなした: $(cat "$LOG_112")"
+mv "$D112/.claude/ralph-loop.local.md.probe" "$D112/.claude/ralph-loop.local.md"
 (cd "$D112" && scripts/ralph-stop.sh >/dev/null)
 wait_for grep -q 'ループが止められた' "$LOG_112" || fail "ralph-stop.sh で止めたのに、見張り役が待ち続けている: $(cat "$LOG_112")"
 wait_for comment_has 112 '"state":"waiting-to-start"' || fail "止めた後に、ループの状態を開始待ちにしていない: $(loop_comments 112)"
@@ -886,7 +891,7 @@ grep -q '^usage_limited_until=' "$D112/.claude/askhub-manual.local.txt" && fail 
 [[ "$(loop_log "$D112")" == "$LOG_112" ]] || fail "ralph-stop.sh で止めたのに、ループを再開した"
 touch "$GH_STATE/closed-112"
 wait_watch_exit "$D112"
-ok "解除を待っている間に ralph-stop.sh で止めたら、自動では再開しない"
+ok "解除を待っている間に ralph-stop.sh で止めたら、自動では再開しない（resume が state をよけている間は、止めたとみなさない）"
 
 # ASKHUB_AUTO_RESUME=0 なら、利用上限で止まったことをログに書くだけで再開しない
 D113="$WORK/repos/myapp-ralph-d113-ctl"
