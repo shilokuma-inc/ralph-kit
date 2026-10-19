@@ -796,6 +796,12 @@ resume_after_usage_limit() {
       watch_note "手動ループの記録が無くなったため、自動では再開しません"
       return 1
     fi
+    # 担当者の resume・launch が state をよけて権限モードを確かめている間（.probe・.saved がある）は、起動が終わるのを待つ
+    # （止めたと読んだり、こちらも resume したりすると、起動中の resume と記録ファイル・ループを取り合う）
+    if [[ -e "$LOOP_STATE.probe" || -e "$LOOP_STATE.saved" ]]; then
+      sleep "${ASKHUB_USAGE_LIMIT_INTERVAL:-60}"
+      continue
+    fi
     if [[ ! -f "$LOOP_STATE" ]]; then
       watch_note "ループが止められた（state ファイルが無い）ため、自動では再開しません（続けるなら scripts/askhub-manual.sh resume ${LOOP_DISCUSSION}）"
       state_unset usage_limited_until
