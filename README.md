@@ -20,6 +20,7 @@ bin/
   ralph-stop.sh                 停止と後片付け
   askhub-manual.sh              手動ループ（担当者の Mac で回す）の準備・起動・状態の書き出し・最終 PR・終了
   opencode-loop.sh              手動ループを OpenCode で回す（ASKHUB_AGENT=opencode のとき、launch が起動する）
+  usage-limit.sh                ループのログから Claude の利用上限の解除の時刻を読む（手動ループの見張り役が使う）
 shim/                           各リポジトリに置くファイルの原本（install.sh が配る）
 install.sh                      リポジトリに中継を入れる・ずれを確かめる
 .github/workflows/
@@ -309,6 +310,11 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    ゴール元の目印つきの最終 PR（`epic-final`）を作る（自動ループでオーケストレーターが作るのと同じ。担当者の指示は要らない）。
    見張り役はメインの checkout で動くシェルで、ループの Claude ではないので、ループの deny（`gh pr create --base develop`）には当たらない。
    promise を出さずに終わったとき（API のエラーなどの異常終了・`ralph-stop.sh` での停止・無進捗での停止）は作らない。
+   そのうち **Claude の利用上限で止まったとき**（ループのログの末尾が `You've hit your session limit · resets 12pm (Asia/Tokyo)` などの上限のメッセージのとき）は、
+   見張り役が解除の時刻の 1 分後に `scripts/askhub-manual.sh resume <N>` でループを再開する（オーケストレーターの自動ループと同じ。解除の時刻の読み方は `bin/usage-limit.sh`）。
+   待っている間は、ループの状態を「上限で待機中」（`usage-limited`・`usageLimitedUntil`）で書く。待っている間に担当者が `resume`・`end`・`ralph-stop.sh` で操作したとき、
+   ゴール元の Discussion が閉じたときは再開しない。`ASKHUB_AUTO_RESUME=0` を付けて `launch` / `resume` すると、ログに書くだけで再開しない。
+   見張り役が動いていなかったとき（Mac の再起動など）は、解除の後に担当者が `resume <N>` を流す。
    結果はループのログに `[askhub-manual …]` の行で残る。`ASKHUB_AUTO_FINAL=0` を付けて `launch` / `resume` すると、最終 PR は作らない（見張り役は下の 7 のために動く）。
    見張り役が動かなかったとき（Mac の再起動・ログアウトなど）や `ASKHUB_AUTO_FINAL=0` のときは、AskHub の「手動ループ」の
    「最終 PR の指示をコピー」から最終 PR の指示を受けて、**制御用 worktree の外で** `scripts/askhub-manual.sh final <N>` を流す。

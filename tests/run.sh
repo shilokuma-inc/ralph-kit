@@ -139,6 +139,8 @@ esac
 GH
 # テスト用の claude。権限モードの確認（stream-json）には init の行を返す。
 # ループとしては、STUB_LOOP=promise なら全タスクを終えて最終 PR に載せる内容を書き、Stop hook と同じく state ファイルを消して promise を出す。
+# STUB_LOOP=limit-once なら、1 回目（STUB_LIMIT_MARK のファイルが無いとき）は Claude の利用上限のメッセージ（解除は STUB_LIMIT_WAIT 秒後）を出して
+# state ファイルを残したまま終わり、2 回目（解除の後の再開）は promise と同じにする。
 # それ以外は state ファイルを残したまま終わる（API のエラーなどの異常終了）
 cat > "$WORK/bin/claude" <<'CLAUDE'
 #!/bin/bash
@@ -146,6 +148,14 @@ case "$*" in
   *stream-json*) echo '{"type":"system","subtype":"init","permissionMode":"bypassPermissions"}'; exit 0 ;;
 esac
 sleep 2
+if [[ "${STUB_LOOP:-}" == limit-once ]]; then
+  if [[ ! -e "${STUB_LIMIT_MARK:?}" ]]; then
+    touch "$STUB_LIMIT_MARK"
+    echo "Claude AI usage limit reached|$(( $(date +%s) + ${STUB_LIMIT_WAIT:-5} ))"
+    exit 1
+  fi
+  STUB_LOOP=promise
+fi
 if [[ "${STUB_LOOP:-}" == promise ]]; then
   perl -pi -e 's/^- \[ \]/- [x]/' .claude/ralph-goal.local.md
   perl -0pi -e 's/(## 最終 PR に載せる内容\n[^\n]*\n)/$1- テストでしたこと\n/' .claude/ralph-state.local.md
@@ -776,6 +786,125 @@ if ASKHUB_AGENT=bogus manual launch 108 "SMOKE DONE" >"$WORK/bogus.out" 2>&1; th
 grep -q 'ASKHUB_AGENT の値が分かりません' "$WORK/bogus.out" || fail "ASKHUB_AGENT の知らない値を知らせていない: $(cat "$WORK/bogus.out")"
 unset ASKHUB_AGENT
 ok "ASKHUB_AGENT の知らない値では起動しない"
+
+# ---- Claude の利用上限のメッセージの読み方（bin/usage-limit.sh）---------------------------------
+# オーケストレーター（ask-hub-apple の UsageLimit.swift）と同じく、ログの末尾 5 行の上限のメッセージから解除の時刻を読む。
+# ログの更新時刻は 2026-10-06T10:00:00Z（日本時間の 19:00）にする
+USAGE_LIMIT="$(cd "$APP" && scripts/ralph-kit.sh path)/bin/usage-limit.sh"
+expect_reset() { # $1=期待する解除の時刻（上限のメッセージが無ければ none） $2=ログの末尾 $3=この Mac の TZ（既定 UTC）
+  local actual
+  printf 'ループの出力\n%s\n' "$2" > "$WORK/limit.log"
+  TZ=UTC touch -t 202610061000.00 "$WORK/limit.log"
+  actual=$(TZ="${3:-UTC}" "$USAGE_LIMIT" "$WORK/limit.log") || actual=none
+  [[ "$actual" == "$1" ]] || fail "「${2}」の解除の時刻が ${1} ではない（${actual}）"
+}
+expect_reset 1791342000 "You've hit your session limit · resets 12pm (Asia/Tokyo)"   # 翌日の 12:00（日本時間）
+expect_reset 1791284400 "You've hit your session limit · resets 8pm (Asia/Tokyo)"    # 同じ日の 20:00（日本時間）
+expect_reset 1791505800 "You've hit your weekly limit · resets Oct 9, 9:30am (Asia/Tokyo)"
+expect_reset 1791298800 "You've hit your session limit · resets 3pm"                 # タイムゾーンが無ければ、この Mac の TZ
+expect_reset 1791352800 "You've hit your session limit · resets 3pm" Asia/Tokyo
+expect_reset 1791298800 "You've hit your session limit · resets 3pm (Mars/Base)"     # 知らないタイムゾーンも、この Mac の TZ
+expect_reset 1791288000 "Claude AI usage limit reached|1791288000"
+expect_reset 1791284400 "Claude AI usage limit reached|1791288000000"                # 8 日より先（ミリ秒など）は 1 時間後
+expect_reset 1791284400 "Claude AI usage limit reached|1791277200"                   # ログより前の時刻も 1 時間後
+expect_reset 1791284400 "You've hit your session limit · resets soon"                # 時刻を読めなければ 1 時間後
+expect_reset none "API Error: Connection refused"
+expect_reset none "$(printf "You've hit your session limit · resets 12pm (Asia/Tokyo)\n1\n2\n3\n4\n5")"  # 末尾 5 行より前は見ない
+ok "Claude の利用上限のメッセージから、オーケストレーターと同じく解除の時刻を読む"
+
+# ---- Claude の利用上限で止まった手動ループの再開 ------------------------------------------------
+# 見張り役は、ループのログの末尾に Claude の利用上限のメッセージがあれば、ループの状態を「上限で待機中」（解除の時刻つき）で書き、
+# 解除の時刻を過ぎたら resume で再開する。再開したループの見張り役が、いつもどおり最終 PR を作る
+limit_loop() { # $1=Discussion の番号 $2=epic。start して playbook と goal を用意する
+  local ctl="$WORK/repos/myapp-ralph-d$1-ctl"
+  manual start "$1" "$2" >/dev/null 2>&1 || fail "Discussion $1 の手動ループを start できない"
+  perl -pi -e 's/\{\{[A-Z_]+\}\}/X/g' "$ctl/.claude/ralph-playbook.local.md"
+  printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$ctl/.claude/ralph-goal.local.md"
+}
+comment_body() { # Discussion $1 の手動ループのコメントの本文
+  local d
+  for d in "$GH_STATE/comments"/*; do
+    [[ -f "$d/body" ]] || continue
+    if head -n 1 "$d/body" | grep -F "\"discussion\":$1," | grep -qF '"writer":"manual"'; then cat "$d/body"; fi
+  done
+}
+limit_launch() { # $1=Discussion の番号 $2=解除までの秒数 $3=ASKHUB_AUTO_RESUME（既定 1）。1 回目は利用上限で止まるループを起動する
+  local n="$1" wait="$2" auto="${3:-1}"
+  (
+    export STUB_LOOP=limit-once STUB_LIMIT_MARK="$WORK/limit-hit-$n" STUB_LIMIT_WAIT="$wait" \
+      ASKHUB_USAGE_LIMIT_INTERVAL=1 ASKHUB_USAGE_LIMIT_MARGIN=0 ASKHUB_AUTO_RESUME="$auto"
+    manual launch "$n" "SMOKE DONE" >/dev/null
+  ) || fail "Discussion $n の launch が失敗した"
+}
+D110="$WORK/repos/myapp-ralph-d110-ctl"
+limit_loop 110 epic/manual-ten
+: > "$WORK/gh.log"
+limit_launch 110 6
+LOG_110=$(loop_log "$D110")
+wait_for comment_has 110 '"state":"usage-limited"' || fail "利用上限で止まったのに、ループの状態を上限で待機中にしていない: $(loop_comments 110) $(cat "$LOG_110")"
+comment_has 110 '"usageLimitedUntil":"' || fail "上限で待機中の状態に、解除の時刻を書いていない: $(loop_comments 110)"
+comment_body 110 | grep -q '^| 上限の解除 | ' || fail "コメントの表に、上限の解除の時刻を書いていない: $(comment_body 110)"
+grep -q '利用上限で止まりました' "$LOG_110" || fail "利用上限で止まったことを、ループのログに書いていない: $(cat "$LOG_110")"
+grep -q '^usage_limited_until=' "$D110/.claude/askhub-manual.local.txt" || fail "解除の時刻を記録していない"
+wait_for eval '[[ "$(loop_log "$D110")" != "$LOG_110" ]]' || fail "解除の時刻を過ぎても、ループを再開していない: $(cat "$LOG_110")"
+grep -q '解除の時刻を過ぎたので、ループを再開します' "$LOG_110" || fail "再開したことを、止まったループのログに書いていない"
+wait_watch "$(loop_log "$D110")"
+grep -q -- '^pr create .*--head epic/manual-ten' "$WORK/gh.log" || fail "再開したループの見張り役が、最終 PR を作っていない: $(cat "$(loop_log "$D110")")"
+grep -q '^usage_limited_until=' "$D110/.claude/askhub-manual.local.txt" && fail "再開したのに、解除の時刻の記録が残っている"
+wait_for comment_has 110 '"state":"completed"' || fail "再開したループが終わった後に、ループの状態を完了にしていない: $(loop_comments 110)"
+comment_has 110 'usageLimitedUntil' && fail "完了したのに、解除の時刻が残っている"
+touch "$GH_STATE/closed-110"
+wait_watch_exit "$D110"
+ok "ループが Claude の利用上限で止まったら、見張り役が上限で待機中と書き、解除の時刻の後に再開する"
+
+# 解除を待っている間に担当者が resume したら、待っていた見張り役は何もせずに終わり、新しいループの見張り役に任せる
+D111="$WORK/repos/myapp-ralph-d111-ctl"
+limit_loop 111 epic/manual-eleven
+: > "$WORK/gh.log"
+limit_launch 111 600
+LOG_111=$(loop_log "$D111")
+wait_for comment_has 111 '"state":"usage-limited"' || fail "利用上限で止まったのに、上限で待機中にしていない: $(cat "$LOG_111")"
+STUB_LOOP=promise manual resume 111 >/dev/null || fail "解除を待っている間の resume が失敗した"
+grep -q '^usage_limited_until=' "$D111/.claude/askhub-manual.local.txt" && fail "resume で起動し直したのに、解除の時刻の記録が残っている"
+wait_for grep -q '別のループが起動しているため、自動では再開しません' "$LOG_111" || fail "resume したのに、待っていた見張り役が終わらない: $(cat "$LOG_111")"
+wait_watch "$(loop_log "$D111")"
+grep -q -- '^pr create .*--head epic/manual-eleven' "$WORK/gh.log" || fail "resume したループの見張り役が、最終 PR を作っていない"
+touch "$GH_STATE/closed-111"
+wait_watch_exit "$D111"
+ok "解除を待っている間に resume したら、待っていた見張り役は自動では再開しない"
+
+# 解除を待っている間に ralph-stop.sh で止めたら、自動では再開しない（ループの状態は開始待ちに戻す）
+D112="$WORK/repos/myapp-ralph-d112-ctl"
+limit_loop 112 epic/manual-twelve
+limit_launch 112 600
+LOG_112=$(loop_log "$D112")
+wait_for comment_has 112 '"state":"usage-limited"' || fail "利用上限で止まったのに、上限で待機中にしていない: $(cat "$LOG_112")"
+# 担当者の resume が state をよけて権限モードを確かめている間（.probe）は、止めたとみなさない
+mv "$D112/.claude/ralph-loop.local.md" "$D112/.claude/ralph-loop.local.md.probe"
+sleep 3
+grep -q 'ループが止められた' "$LOG_112" && fail "resume が state をよけている間に、ループが止められたとみなした: $(cat "$LOG_112")"
+mv "$D112/.claude/ralph-loop.local.md.probe" "$D112/.claude/ralph-loop.local.md"
+(cd "$D112" && scripts/ralph-stop.sh >/dev/null)
+wait_for grep -q 'ループが止められた' "$LOG_112" || fail "ralph-stop.sh で止めたのに、見張り役が待ち続けている: $(cat "$LOG_112")"
+wait_for comment_has 112 '"state":"waiting-to-start"' || fail "止めた後に、ループの状態を開始待ちにしていない: $(loop_comments 112)"
+grep -q '^usage_limited_until=' "$D112/.claude/askhub-manual.local.txt" && fail "止めたのに、解除の時刻の記録が残っている"
+[[ "$(loop_log "$D112")" == "$LOG_112" ]] || fail "ralph-stop.sh で止めたのに、ループを再開した"
+touch "$GH_STATE/closed-112"
+wait_watch_exit "$D112"
+ok "解除を待っている間に ralph-stop.sh で止めたら、自動では再開しない（resume が state をよけている間は、止めたとみなさない）"
+
+# ASKHUB_AUTO_RESUME=0 なら、利用上限で止まったことをログに書くだけで再開しない
+D113="$WORK/repos/myapp-ralph-d113-ctl"
+limit_loop 113 epic/manual-thirteen
+limit_launch 113 1 0
+LOG_113=$(loop_log "$D113")
+wait_for grep -q 'ASKHUB_AUTO_RESUME=0 のため、自動では再開しません' "$LOG_113" || fail "ASKHUB_AUTO_RESUME=0 で再開しないことを、ログに書いていない: $(cat "$LOG_113")"
+sleep 3
+[[ "$(loop_log "$D113")" == "$LOG_113" ]] || fail "ASKHUB_AUTO_RESUME=0 なのに再開した"
+grep -q '^usage_limited_until=' "$D113/.claude/askhub-manual.local.txt" && fail "ASKHUB_AUTO_RESUME=0 なのに、解除の時刻を記録した"
+touch "$GH_STATE/closed-113"
+wait_watch_exit "$D113"
+ok "ASKHUB_AUTO_RESUME=0 なら、利用上限で止まっても再開しない"
 
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e
