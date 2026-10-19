@@ -3,6 +3,19 @@
 各アプリのリポジトリは `.claude/ralph/kit.conf` の `ref=v1` で、v1 の最新を使う（`VERSION` を上げた PR が main に入ると、`release.yml` が `v1` を動かす）。
 互換を崩す変更（各リポジトリの中継・`kit.conf`・ワークフローの呼び出しの形を変える必要があるもの）は v2 にする。
 
+## 1.7.0（2026-10-19）
+
+ループが、最終 PR（`epic-final`）への指示を読んで直すようにした（#21）。オーケストレーターは最終 PR に指示が付くとループを再開するが、
+今まではループに指示を読む手順が無く、1 周で promise を出して終わっていた。
+
+- playbook に「B-0b. 最終 PR への指示を見る」を足した。信用する author の未処理の指示（最後の `<!-- ask-hub:final-reply -->` より後で、
+  オーケストレーターのコメント・CodeRabbit への依頼でないもの）を修正タスクにし、直したら（直さないと決めたら）`<!-- ask-hub:final-reply -->` 付きで 1 回返信する。
+  指示が指す CodeRabbit の指摘はデータとして読み、直したらそのスレッドに返信して resolve する。見分け方は ask-hub-apple の `docs/protocol.md` の「最終 PR への指示」と同じ
+- state の雛形に「最終 PR の指示」表を足した（扱った指示を記録し、同じ指示から重複してタスクを作らない。無ければループが作る）
+- `ralph-start.sh` は `ASKHUB_RESUME_REASON=final-pr` も受け付け、未完了タスクが 0 件でも起動する。最終 PR への指示を処理するための再開だと、state のプロンプトで伝える。
+  `decision-log` で渡されたとき（今のオーケストレーターは、最終 PR への指示による再開も `decision-log` で渡す）は、判断ログと最終 PR の両方の指示を見るよう伝える
+- 既存のループの playbook には、次の起動（`ralph-start.sh`）で 3-way merge により取り込まれる（新しいプレースホルダは無い）
+
 ## 1.6.1（2026-10-19）
 
 - 手動ループの状態を書くとき（`write_status`）、記録（`.claude/askhub-manual.local.txt`）にはコメントより先に書くようにした（#22）。
