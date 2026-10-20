@@ -92,6 +92,8 @@ use_loop() {
   RALPH_STATE="$CTL/.claude/ralph-state.local.md"
   PLAYBOOK="$CTL/.claude/ralph-playbook.local.md"
   PID_FILE="$CTL/.claude/askhub-loop.pid"
+  # 起動ロック（acquire_launch_lock）。名前は ralph-setup.sh が info/exclude に足す .claude/*.local.txt に合わせる（残っても git に載らない）
+  LAUNCH_LOCK="$CTL/.claude/askhub-launch.local.txt"
 }
 
 # kit 1.3 までに固定パス（<名前>-ralph-ctl）で始めた、その Discussion の手動ループがあるか。
@@ -206,6 +208,47 @@ loop_alive() {
   [[ -f "$PID_FILE" ]] || return 1
   pid=$(tr -d '[:space:]' < "$PID_FILE")
   [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# 起動ロック: 担当者の launch / resume と、見張り役の回答による再開が、同時にループを起動しないようにする。
+# ループが完了した後は state ファイルが無く、担当者の resume も .probe を作らないので、ファイルの有無では見分けられない。
+# ロックのファイルは set -C（O_EXCL）で作り、持ち主の PID を書く。持ち主が終わっていれば（fail で抜けた・強制終了された）、
+# 残ったロックは捨てて取り直す（trap は launch_loop が使うので、解放は呼び出し側が明示的に行う）。
+# ASKHUB_LAUNCH_LOCK が同じロックなら、呼び出し元（見張り役）が持っているので取らない。この先に起動するループ・見張り役には引き継がない
+LAUNCH_LOCK_OWNED=false
+acquire_launch_lock() {
+  local owner age
+  if [[ "${ASKHUB_LAUNCH_LOCK:-}" == "$LAUNCH_LOCK" ]]; then
+    unset ASKHUB_LAUNCH_LOCK
+    return 0
+  fi
+  mkdir -p "$(dirname "$LAUNCH_LOCK")"
+  if ( set -C; echo "$$" > "$LAUNCH_LOCK" ) 2>/dev/null; then
+    LAUNCH_LOCK_OWNED=true
+    return 0
+  fi
+  owner=$({ tr -d '[:space:]' < "$LAUNCH_LOCK"; } 2>/dev/null || true)
+  age=$(( $(date +%s) - $(mtime "$LAUNCH_LOCK") ))
+  # 持ち主が動いている（取ってから 10 分以内。それより古ければ PID の使い回しとみなす）・PID を書く前（取った直後）なら、起動の最中
+  if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null && (( age < 600 )); then return 1; fi
+  if [[ -z "$owner" ]] && (( age < 60 )); then return 1; fi
+  rm -f "$LAUNCH_LOCK"
+  if ( set -C; echo "$$" > "$LAUNCH_LOCK" ) 2>/dev/null; then
+    LAUNCH_LOCK_OWNED=true
+    return 0
+  fi
+  return 1
+}
+
+release_launch_lock() {
+  [[ "$LAUNCH_LOCK_OWNED" == true ]] || return 0
+  rm -f "$LAUNCH_LOCK"
+  LAUNCH_LOCK_OWNED=false
+}
+
+# 起動ロックを取れなかったときに止める（launch / resume）
+require_launch_lock() {
+  acquire_launch_lock || fail "Discussion #$LOOP_DISCUSSION のループを起動している最中です（見張り役が ask の回答を受けて再開しているかもしれません）。少し待ってから scripts/askhub-manual.sh status $LOOP_DISCUSSION で確かめてください"
 }
 
 # Discussion の ready-for-loop を外す（Discussion のラベルは REST で外せないので GraphQL を使う）
@@ -796,10 +839,11 @@ waiting_asks() {
 # 再開に使った ask の id は記録し、同じ回答では再開し直さない（ループが回答を処理しないまま終わっても、起動を繰り返さない）。
 # 再開したら 0 を返す（このループの見張りは、新しいループの見張り役に任せる）。回答が無い・再開しなかったときは 1
 resume_after_answer() {
-  local asks resumed trusted pr ask logins login answered="" ids=""
+  local asks resumed trusted pr ask logins login pid answered="" ids=""
   asks=$(waiting_asks)
   [[ -n "$asks" ]] || return 1
-  # 担当者の resume・launch が起動している最中（state ファイル・.probe・.saved がある）は、そちらに任せる
+  # 担当者の resume・launch が起動した・起動している最中（state ファイル・.probe・.saved がある）は、そちらに任せる
+  # （ファイルの無い間の起動は、下の起動ロックで見分ける）
   [[ ! -e "$LOOP_STATE" && ! -e "$LOOP_STATE.probe" && ! -e "$LOOP_STATE.saved" ]] || return 1
   resumed=$(state_get resumed_asks)
   # 取得できない（空）ときは、誰の返信も回答とみなさない
@@ -819,13 +863,23 @@ resume_after_answer() {
     done <<<"$logins"
   done <<<"$asks"
   [[ -n "$ids" ]] || return 1
+  # 担当者の launch / resume と同時に起動しないよう、起動ロックを取ってから確かめ直す
+  # （取れなければ、担当者が起動している最中。次の確認で、新しいループの PID を見て見張りを任せる）
+  acquire_launch_lock || return 1
+  pid=$({ tr -d '[:space:]' < "$PID_FILE"; } 2>/dev/null || true)
+  if [[ -e "$LOOP_STATE" || ( -n "$pid" && "$pid" != "$WATCHED" ) ]]; then
+    release_launch_lock
+    return 1
+  fi
   # ループを起動する前に記録する（起動した後は、ループの status も記録ファイルを書き換える）
   state_set resumed_asks "$resumed${resumed:+,}$ids"
   watch_note "回答待ちの PR（${answered}）の ask に回答が付いたので、ループを再開します"
-  # resume は新しいループと、その見張り役を起動する
-  if (cd "$MAIN" && "$KIT_DIR/bin/askhub-manual.sh" resume "$LOOP_DISCUSSION"); then
+  # resume は新しいループと、その見張り役を起動する。起動ロックはこちらが持ったまま、resume には取らせない
+  if (cd "$MAIN" && ASKHUB_LAUNCH_LOCK="$LAUNCH_LOCK" "$KIT_DIR/bin/askhub-manual.sh" resume "$LOOP_DISCUSSION"); then
+    release_launch_lock
     return 0
   fi
+  release_launch_lock
   ANSWER_RESUME_FAILS=$(( ${ANSWER_RESUME_FAILS:-0} + 1 ))
   if (( ANSWER_RESUME_FAILS < 3 )); then
     # 記録を戻し、次の確認でやり直す
@@ -982,9 +1036,11 @@ NEXT
     fi
     [[ -n "$PROMISE" ]] || usage
     resolve_loop "$DISCUSSION"
+    require_launch_lock
     refresh_trusted_authors "$(trusted_authors)"
     state_set promise "$PROMISE"
     launch_loop "$PROMISE"
+    release_launch_lock
     ;;
 
   status)
@@ -1007,6 +1063,7 @@ NEXT
   resume)
     [[ -z "${1:-}" || "$1" =~ ^[0-9]+$ ]] || usage
     resolve_loop "${1:-}"
+    require_launch_lock
     PROMISE=$(state_get promise)
     [[ -n "$PROMISE" ]] || fail "完了語の記録がありません（launch で起動してください）"
     # 片付け済みのスロットを作り直す
@@ -1015,6 +1072,7 @@ NEXT
     # 再開したループがまた完了したら、final が open な最終 PR の本文を今の内容で書き直す（回答待ちの PR の扱いが変わるため）
     state_set final_refresh 1
     launch_loop "$PROMISE"
+    release_launch_lock
     ;;
 
   watch-final)
