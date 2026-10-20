@@ -321,6 +321,8 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    2 分おき（`ASKHUB_ANSWER_WATCH_INTERVAL`）に確かめ、信用する author の返信（`in_reply_to_id` が ask の id。playbook の B-1 と同じ判定）が付いたら
    `resume <N>` でループを再開する。オーケストレーターは手動ループの epic 宛ての PR の回答では再開しないので、見張り役が代わりに拾う。
    再開に使った ask の id は記録（`resumed_asks`）し、同じ回答ではもう再開しない。promise を出さずに終わったときは、回答が付いても再開しない。
+   担当者の `launch` / `resume` と見張り役の再開は、起動ロック（`.claude/askhub-launch.local.txt`。持ち主の PID を書く）で排他し、
+   ロックを取れない `launch` / `resume` は「起動している最中です」で断る（持ち主の終わったロックは捨てて取り直す）。
    `ASKHUB_AUTO_RESUME=0` を付けて `launch` / `resume` すると、回答でも再開しない（担当者が `resume` を流す）。
    `resume` で再開したループがまた promise を出すと、`final` は open な最終 PR を作り直さず、本文を今の「最終 PR に載せる内容」と回答待ちの PR で書き直す
    （オーケストレーターの自動ループと同じ。マージ済みの PR は書き直さない）。
