@@ -305,7 +305,9 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    gh のアカウントが信用する author でなければ書かない（読む側は信用する author のコメントだけを読む）。
    使う Issue はオーケストレーターと同じ選び方で決める（信用する author が作った `loop-status` の Issue のうち、open で最も新しく更新されたもの。
    無ければ閉じたもののうち最も新しく更新されたものを開き直す。1 つも無ければ、ループの状態を書かない本文で担当者のアカウントで作る）
-5. 回答がそろったら（AskHub に「回答がそろいました」が出る）、再開の指示を受けて `scripts/askhub-manual.sh resume <N>`
+5. ループが動いている間に付いた回答は、ループ自身が次の周回で拾う（playbook の B-1）。回答待ちの PR を残してループが promise を出して終わった後に付いた回答は、
+   見張り役が拾って `scripts/askhub-manual.sh resume <N>` でループを再開する（下の 6）。見張り役が動いていなかったとき（Mac の再起動など）は、
+   回答がそろったら（AskHub に「回答がそろいました」が出る）、再開の指示を受けて担当者が `resume <N>` を流す
 6. ループが全タスクを終えて promise を出すと、見張り役が**制御用 worktree の外（メインの checkout）で** `scripts/askhub-manual.sh final <N>` を流し、
    ゴール元の目印つきの最終 PR（`epic-final`）を作る（自動ループでオーケストレーターが作るのと同じ。担当者の指示は要らない）。
    見張り役はメインの checkout で動くシェルで、ループの Claude ではないので、ループの deny（`gh pr create --base develop`）には当たらない。
@@ -315,6 +317,13 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    待っている間は、ループの状態を「上限で待機中」（`usage-limited`・`usageLimitedUntil`）で書く。待っている間に担当者が `resume`・`end`・`ralph-stop.sh` で操作したとき、
    ゴール元の Discussion が閉じたときは再開しない。`ASKHUB_AUTO_RESUME=0` を付けて `launch` / `resume` すると、ログに書くだけで再開しない。
    見張り役が動いていなかったとき（Mac の再起動など）は、解除の後に担当者が `resume <N>` を流す。
+   **回答待ちの PR を残して promise を出したとき**は、最終 PR を作った後、見張り役が goal の `※回答待ち（PR #123 / ask id 456）` の ask を
+   2 分おき（`ASKHUB_ANSWER_WATCH_INTERVAL`）に確かめ、信用する author の返信（`in_reply_to_id` が ask の id。playbook の B-1 と同じ判定）が付いたら
+   `resume <N>` でループを再開する。オーケストレーターは手動ループの epic 宛ての PR の回答では再開しないので、見張り役が代わりに拾う。
+   再開に使った ask の id は記録（`resumed_asks`）し、同じ回答ではもう再開しない。promise を出さずに終わったときは、回答が付いても再開しない。
+   `ASKHUB_AUTO_RESUME=0` を付けて `launch` / `resume` すると、回答でも再開しない（担当者が `resume` を流す）。
+   `resume` で再開したループがまた promise を出すと、`final` は open な最終 PR を作り直さず、本文を今の「最終 PR に載せる内容」と回答待ちの PR で書き直す
+   （オーケストレーターの自動ループと同じ。マージ済みの PR は書き直さない）。
    結果はループのログに `[askhub-manual …]` の行で残る。`ASKHUB_AUTO_FINAL=0` を付けて `launch` / `resume` すると、最終 PR は作らない（見張り役は下の 7 のために動く）。
    見張り役が動かなかったとき（Mac の再起動・ログアウトなど）や `ASKHUB_AUTO_FINAL=0` のときは、AskHub の「手動ループ」の
    「最終 PR の指示をコピー」から最終 PR の指示を受けて、**制御用 worktree の外で** `scripts/askhub-manual.sh final <N>` を流す。

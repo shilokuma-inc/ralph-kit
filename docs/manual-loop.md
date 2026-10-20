@@ -83,12 +83,17 @@ OpenCode のときの起動は、権限モードの確認（`claude` の起動�
 - ログを見る: `~/Library/Logs/askhub/manual/` の `<リポジトリ>-d<N>-loop-<日時>.log` を `tail -f`
 - 進み具合: `scripts/askhub-manual.sh status <N>`（どのフォルダで実行してもよい。番号を付ける）
 - OpenCode のときは、周回は 1 つのセッションで続く（一覧に `ralph d<N>（OpenCode）`）。前の続きから作業する
-- 答えてほしいこと（ask）があると、PR に書かれ、AskHub から知らせが届く。答えたら指示をコピーして `resume`（自動では再開しない。差し戻しは下の「4.」）
+- 答えてほしいこと（ask）があると、PR に書かれ、AskHub から知らせが届く。AskHub で答えるだけでよい（差し戻しは下の「4.」）
+  - ループが動いている間の回答は、ループが次の周回で拾う
+  - 回答待ちの PR を残してループが終わった後の回答は、見張り役が 2 分以内に拾って `resume` で再開する（ログに `[askhub-manual …] 回答待ちの PR（#…）の ask に回答が付いたので、ループを再開します`）
+  - 自動で再開させたくないとき: `ASKHUB_AUTO_RESUME=0` を付けて `launch` / `resume` する（答えたら指示をコピーして `resume`）
+  - Mac を再起動した後など、見張り役が止まっているときは、答えたら指示をコピーして `resume`
 - 止めたいとき: 制御用 worktree で `scripts/ralph-stop.sh`（state が消えてループが止まる）
 
 ## 4. 終わり・止まったとき
 
 - 完了語を検知すると state が消えてループが終わり、**見張り役が自動で最終 PR を作る**（epic → ベースブランチ、`epic-final` ラベル）
+- 回答待ちの PR が残っているうちは、最終 PR に入っていない変更がある。回答で再開したループが終わると、見張り役が最終 PR の本文を書き直すので、それからマージする
 - 最終 PR の中身と CI を確認して**マージ**する
 - 元の Discussion を**閉じる**と、ループの状態コメントが片付く
 
@@ -117,6 +122,7 @@ OpenCode のときの起動は、権限モードの確認（`claude` の起動�
 | 設定したのに Claude Code で回る | そのターミナルで `echo "$ASKHUB_AGENT"` が `opencode` か、`scripts/ralph-kit.sh version` が 1.6.0 以降かを確認する（設定後はターミナルを開き直す） |
 | `ralph-loop@claude-plugins-official が有効になっていません` と言われて始まらない | Claude Code（既定）で回す人向け。`claude plugin install ralph-loop@claude-plugins-official` で入れる。OpenCode のつもりなら `ASKHUB_AGENT` の設定を確認する |
 | ループが止まっている | ログの末尾を確認し、`resume`（AskHub から指示をコピー）。Claude の利用上限で止まり「自動で再開します」とあれば、解除の時刻まで待つ |
+| 回答したのに「回答待ち」のまま | 見張り役が動いているか（`askhub-manual.local.txt` の `watch_pid`）と、ログの末尾を確認する。動いていなければ `resume` |
 | 古い kit のまま | `v1` の取り直しは既定 5 分間隔。`RALPH_KIT_FETCH_INTERVAL=0 scripts/ralph-kit.sh version` |
 | 最終 PR が無い | 見張り役のメッセージ（ログ）を確認し、`final <N>` を手で流す |
 | 同じリポジトリで並べて回したい | そのままでよい。作業場所・状態コメントは Discussion ごとに分かれる |
