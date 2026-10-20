@@ -36,12 +36,14 @@ cat > "$WORK/bin/gh" <<'GH'
 # テスト用の gh。GitHub の代わりに、状態用の Issue・そのコメント・閉じた Discussion を GH_STATE のファイルで持つ。
 # 応答は JSON で作り、--jq があれば jq で絞る（本物の gh と同じく、文字列はそのまま出す）。書き込み権限を持つのは test だけ。
 # Discussion はどの番号も manual-loop 付きで test が担当。GH_STATE/closed-<番号> があれば閉じている。
+# GH_STATE/needs-answer/<番号> があれば、その PR は needs-answer 付きで open。GH_STATE/pulls/<番号>.json は PR の行コメント（JSON の配列）。
+# GH_STATE/final-pr/<head の / を _ にしたもの> は、その head の PR の一覧（JSON の配列。最終 PR が既にあるとき）
 # gh のアカウントは GH_VIEWER（既定は test）。GH_LOG があれば、呼ばれた引数をそこに書き足す
 [[ -z "${GH_LOG:-}" ]] || printf '%s\n' "$*" >> "$GH_LOG"
 S="${GH_STATE:?}"
 mkdir -p "$S/issues" "$S/comments"
 
-jq_expr="" method="" body="" query="" number="" author=""
+jq_expr="" method="" body="" query="" number="" author="" label="" head=""
 positional=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,7 +58,9 @@ while [[ $# -gt 0 ]]; do
         n=*) number="${2#n=}" ;;
       esac
       shift ;;
-    -R | --label | --state | --limit | --json | --title | --color | --description | --base | --head | --assignee) shift ;;
+    --label) label="$2"; shift ;;
+    --head) head="$2"; shift ;;
+    -R | --state | --limit | --json | --title | --color | --description | --base | --assignee) shift ;;
     -*) ;;
     *) positional+=("$1") ;;
   esac
@@ -115,6 +119,9 @@ case "${positional[0]:-} ${positional[1]:-}" in
         [[ -d "$S/comments/${rest#comments/}" ]] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
         rm -r "${S:?}/comments/${rest#comments/}" ;;
     esac ;;
+  "api repos/example/myapp-ios/pulls/"*)
+    rest="${endpoint#repos/example/myapp-ios/pulls/}"
+    if [[ -f "$S/pulls/${rest%%/*}.json" ]]; then out < "$S/pulls/${rest%%/*}.json"; else echo '[]' | out; fi ;;
   "issue list")
     for d in "$S/issues"/*; do
       [[ -f "$d/author" ]] || continue
@@ -132,7 +139,16 @@ case "${positional[0]:-} ${positional[1]:-}" in
   "issue view") jq -n --rawfile body "$S/issues/${positional[2]}/body" '{body: $body}' | out ;;
   "issue reopen") printf '%s' OPEN > "$S/issues/${positional[2]}/state" ;;
   "issue edit") printf '%s' "$body" > "$S/issues/${positional[2]}/body" ;;
-  "pr list") echo '[]' | out ;;
+  "pr list")
+    if [[ "$label" == needs-answer ]]; then
+      for f in "$S/needs-answer"/*; do
+        [[ -f "$f" ]] && jq -n --argjson number "${f##*/}" '{number: $number}'
+      done | jq -s . | out
+    elif [[ -n "$head" && -f "$S/final-pr/${head//\//_}" ]]; then
+      out < "$S/final-pr/${head//\//_}"
+    else
+      echo '[]' | out
+    fi ;;
   "pr create") echo "https://github.com/example/myapp-ios/pull/99" ;;
   *) exit 0 ;;
 esac
@@ -141,6 +157,9 @@ GH
 # ループとしては、STUB_LOOP=promise なら全タスクを終えて最終 PR に載せる内容を書き、Stop hook と同じく state ファイルを消して promise を出す。
 # STUB_LOOP=limit-once なら、1 回目（STUB_LIMIT_MARK のファイルが無いとき）は Claude の利用上限のメッセージ（解除は STUB_LIMIT_WAIT 秒後）を出して
 # state ファイルを残したまま終わり、2 回目（解除の後の再開）は promise と同じにする。
+# STUB_LOOP=answer-once なら、1 回目（STUB_ANSWER_MARK のファイルが無いとき）は、タスクに ※回答待ち（PR #STUB_ANSWER_PR / ask id STUB_ANSWER_ID）を付けて
+# その PR を needs-answer にし、promise を出して終わる（回答待ちの PR を残して完了）。2 回目（回答を受けた再開）は、playbook の B-1 と同じく
+# 印と needs-answer を外し、最終 PR に載せる内容に「回答を受けて直したこと」を足してから、promise と同じにする。
 # それ以外は state ファイルを残したまま終わる（API のエラーなどの異常終了）
 cat > "$WORK/bin/claude" <<'CLAUDE'
 #!/bin/bash
@@ -154,6 +173,22 @@ if [[ "${STUB_LOOP:-}" == limit-once ]]; then
     echo "Claude AI usage limit reached|$(( $(date +%s) + ${STUB_LIMIT_WAIT:-5} ))"
     exit 1
   fi
+  STUB_LOOP=promise
+fi
+if [[ "${STUB_LOOP:-}" == answer-once ]]; then
+  if [[ ! -e "${STUB_ANSWER_MARK:?}" ]]; then
+    touch "$STUB_ANSWER_MARK"
+    perl -pi -e 's/^(- \[ \] .*)$/$1  ※回答待ち（PR #$ENV{STUB_ANSWER_PR} \/ ask id $ENV{STUB_ANSWER_ID}）/' .claude/ralph-goal.local.md
+    mkdir -p "$GH_STATE/needs-answer"
+    touch "$GH_STATE/needs-answer/$STUB_ANSWER_PR"
+    perl -0pi -e 's/(## 最終 PR に載せる内容\n[^\n]*\n)/$1- テストでしたこと\n/' .claude/ralph-state.local.md
+    rm -f .claude/ralph-loop.local.md
+    echo '<promise>SMOKE DONE</promise>'
+    exit 0
+  fi
+  perl -pi -e 's/  ※回答待ち（PR #\d+ \/ ask id \d+）//' .claude/ralph-goal.local.md
+  rm -f "$GH_STATE/needs-answer/$STUB_ANSWER_PR"
+  perl -0pi -e 's/(## 最終 PR に載せる内容\n[^\n]*\n)/$1- 回答を受けて直したこと\n/' .claude/ralph-state.local.md
   STUB_LOOP=promise
 fi
 if [[ "${STUB_LOOP:-}" == promise ]]; then
@@ -399,7 +434,7 @@ ok "2 回目の ralph-setup.sh は埋めた playbook を残し、スロットを
 # そのあと、ゴール元の Discussion が閉じたら、ループの状態のコメントを消す
 printf 'repository=example/myapp-ios\ndiscussion=1\nepic=epic/smoke\nbase_branch=develop\nrunner=test\n' > "$CTL/.claude/askhub-manual.local.txt"
 manual() {
-  (cd "$APP" && ASKHUB_LOG_DIR="$WORK/logs" ASKHUB_FINAL_WATCH_INTERVAL=1 ASKHUB_CLOSE_WATCH_INTERVAL=1 GH_LOG="$WORK/gh.log" \
+  (cd "$APP" && ASKHUB_LOG_DIR="$WORK/logs" ASKHUB_FINAL_WATCH_INTERVAL=1 ASKHUB_CLOSE_WATCH_INTERVAL=1 ASKHUB_ANSWER_WATCH_INTERVAL=1 GH_LOG="$WORK/gh.log" \
     scripts/askhub-manual.sh "$@")
 }
 loop_log() { sed -n 's/^log=//p' "${1:-$CTL}/.claude/askhub-manual.local.txt" | tail -n 1; }
@@ -412,7 +447,7 @@ wait_for() { # 条件が成り立つまで待つ（最大 30 秒）
   done
 }
 wait_watch() { # 見張り役が結果をログに書くまで待つ
-  wait_for grep -Eq '最終 PR を作りました|最終 PR は作りません|最終 PR を作れませんでした' "$1" \
+  wait_for grep -Eq '最終 PR を作りました|最終 PR の本文を書き直しました|最終 PR は作りません|最終 PR を作れませんでした' "$1" \
     || fail "見張り役が結果をログに書かない: $(cat "$1" 2>/dev/null)"
 }
 watch_exited() {
@@ -905,6 +940,81 @@ grep -q '^usage_limited_until=' "$D113/.claude/askhub-manual.local.txt" && fail 
 touch "$GH_STATE/closed-113"
 wait_watch_exit "$D113"
 ok "ASKHUB_AUTO_RESUME=0 なら、利用上限で止まっても再開しない"
+
+# ---- 回答待ちの PR を残して終わった手動ループの、ask の回答による再開 ----------------------------------
+# ループが回答待ちの PR を残して promise を出して終わったら、見張り役は最終 PR を作った後、goal の ※回答待ち の ask に
+# 信用する author の返信が付くのを待ち、付いたら resume で再開する（信用しない author の返信・ほかのコメントへの返信では再開しない）。
+# 再開したループがまた完了したら、final は既にある open な最終 PR を作り直さず、本文を今の内容で書き直す
+answer_launch() { # $1=Discussion の番号 $2=PR の番号 $3=ask の id $4=ASKHUB_AUTO_RESUME（既定 1）。1 回目は回答待ちの PR を残して終わるループを起動する
+  local n="$1" auto="${4:-1}"
+  (
+    export STUB_LOOP=answer-once STUB_ANSWER_MARK="$WORK/answer-asked-$n" STUB_ANSWER_PR="$2" STUB_ANSWER_ID="$3" ASKHUB_AUTO_RESUME="$auto"
+    manual launch "$n" "SMOKE DONE" >/dev/null
+  ) || fail "Discussion $n の launch が失敗した"
+}
+D114="$WORK/repos/myapp-ralph-d114-ctl"
+limit_loop 114 epic/manual-fourteen
+: > "$WORK/gh.log"
+answer_launch 114 7 70
+LOG_114=$(loop_log "$D114")
+wait_watch "$LOG_114"
+grep -q -- '^pr create .*--head epic/manual-fourteen' "$WORK/gh.log" || fail "回答待ちの PR を残して終わったのに、最終 PR を作っていない: $(cat "$LOG_114")"
+wait_for comment_has 114 '"state":"waiting-for-answer"' || fail "回答待ちの PR を残して終わったのに、ループの状態を回答待ちにしていない: $(loop_comments 114)"
+# 最終 PR ができた（以降の final は、既にある open な PR として扱う）
+mkdir -p "$GH_STATE/final-pr" "$GH_STATE/pulls"
+echo '[{"url":"https://github.com/example/myapp-ios/pull/99","state":"OPEN"}]' > "$GH_STATE/final-pr/epic_manual-fourteen"
+echo '[{"id":70,"in_reply_to_id":null,"user":{"login":"test"},"body":"ask"},
+  {"id":71,"in_reply_to_id":70,"user":{"login":"stranger"},"body":"回答: A"},
+  {"id":72,"in_reply_to_id":69,"user":{"login":"test"},"body":"回答: B"}]' > "$GH_STATE/pulls/7.json"
+sleep 4
+[[ "$(loop_log "$D114")" == "$LOG_114" ]] || fail "信用しない author の返信か、ほかのコメントへの返信で再開した: $(cat "$LOG_114")"
+[[ ! -e "$D114/.claude/askhub-launch.local.txt" ]] || fail "launch が終わったのに、起動ロックが残っている"
+# 起動ロックを持つ人（担当者の launch / resume）がいる間は、回答が付いても再開しない。担当者の resume も、ロックを取れなければ断る
+sleep 600 &
+HOLDER=$!
+echo "$HOLDER" > "$D114/.claude/askhub-launch.local.txt"
+echo '[{"id":70,"in_reply_to_id":null,"user":{"login":"test"},"body":"ask"},
+  {"id":73,"in_reply_to_id":70,"user":{"login":"test"},"body":"回答: A"}]' > "$GH_STATE/pulls/7.json"
+if manual resume 114 >"$WORK/locked.out" 2>&1; then fail "起動ロックを取れないのに、resume が起動した"; fi
+grep -q '起動している最中です' "$WORK/locked.out" || fail "起動ロックを取れないことを知らせていない: $(cat "$WORK/locked.out")"
+sleep 4
+[[ "$(loop_log "$D114")" == "$LOG_114" ]] || fail "起動ロックを持つ人がいるのに、回答で再開した: $(cat "$LOG_114")"
+# 持ち主が終わったロック（fail で抜けた・強制終了された）は、捨てて取り直す
+kill "$HOLDER"
+wait "$HOLDER" 2>/dev/null || true
+wait_for eval '[[ "$(loop_log "$D114")" != "$LOG_114" ]]' || fail "ask に回答が付いても、ループを再開していない: $(cat "$LOG_114")"
+grep -q '回答待ちの PR（#7）の ask に回答が付いたので、ループを再開します' "$LOG_114" || fail "回答で再開したことを、終わったループのログに書いていない: $(cat "$LOG_114")"
+grep -q '^resumed_asks=70$' "$D114/.claude/askhub-manual.local.txt" || fail "再開に使った ask の id を記録していない"
+wait_for eval '[[ ! -e "$D114/.claude/askhub-launch.local.txt" ]]' || fail "回答で再開した後も、起動ロックが残っている"
+LOG_114B=$(loop_log "$D114")
+wait_watch "$LOG_114B"
+grep -q -- '^pr edit https://github.com/example/myapp-ios/pull/99 ' "$WORK/gh.log" || fail "再開したループが完了したのに、最終 PR の本文を書き直していない: $(cat "$LOG_114B")"
+grep -q '回答を受けて直したこと' "$WORK/gh.log" || fail "書き直した本文に、再開したループの「最終 PR に載せる内容」が無い"
+[[ "$(grep -c '^pr create' "$WORK/gh.log")" -eq 1 ]] || fail "最終 PR が既にあるのに、作り直した"
+grep -q '^final_refresh=' "$D114/.claude/askhub-manual.local.txt" && fail "本文を書き直した後も、書き直しの印が残っている"
+wait_for comment_has 114 '"state":"completed"' || fail "再開したループが完了した後に、ループの状態を完了にしていない: $(loop_comments 114)"
+# 再開に使った回答では、もう一度は再開しない（ループが印を外さずに終わったときに、起動を繰り返さない）
+perl -pi -e 's/^- \[x\] (.*)$/- [ ] $1  ※回答待ち（PR #7 \/ ask id 70）/' "$D114/.claude/ralph-goal.local.md"
+sleep 4
+[[ "$(loop_log "$D114")" == "$LOG_114B" ]] || fail "再開に使った回答で、もう一度再開した"
+touch "$GH_STATE/closed-114"
+wait_watch_exit "$D114"
+ok "回答待ちの PR を残して終わった手動ループは、ask に信用する author の回答が付いたら再開し、完了したら最終 PR の本文を書き直す"
+
+# ASKHUB_AUTO_RESUME=0 なら、回答が付いても再開しない（回答待ちの PR があることをログに書くだけ）
+D115="$WORK/repos/myapp-ralph-d115-ctl"
+limit_loop 115 epic/manual-fifteen
+answer_launch 115 8 80 0
+LOG_115=$(loop_log "$D115")
+wait_watch "$LOG_115"
+wait_for grep -q 'ASKHUB_AUTO_RESUME=0 のため、回答が付いても自動では再開しません' "$LOG_115" || fail "ASKHUB_AUTO_RESUME=0 で回答では再開しないことを、ログに書いていない: $(cat "$LOG_115")"
+echo '[{"id":81,"in_reply_to_id":80,"user":{"login":"test"},"body":"回答: A"}]' > "$GH_STATE/pulls/8.json"
+sleep 3
+[[ "$(loop_log "$D115")" == "$LOG_115" ]] || fail "ASKHUB_AUTO_RESUME=0 なのに、回答で再開した"
+touch "$GH_STATE/closed-115"
+wait_watch_exit "$D115"
+rm -f "$GH_STATE/needs-answer/8"
+ok "ASKHUB_AUTO_RESUME=0 なら、回答待ちの PR に回答が付いても再開しない"
 
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e

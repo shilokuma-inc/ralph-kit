@@ -21,11 +21,13 @@
 #              既定は claude -p（bypassPermissions で起動する。MDM などで禁止された Mac では auto モード。どちらも使えなければ起動しない）。
 #              ASKHUB_AGENT=opencode のときは bin/opencode-loop.sh（opencode run --auto）で起動する（README の「OpenCode で回す」を参照）
 #              あわせて見張り役（watch-final）を裏で起動し、ループが完了語を出して終わったら final を流す（ASKHUB_AUTO_FINAL=0 なら流さない）。
-#              ループが Claude の利用上限で止まったら、見張り役が解除の時刻まで待って resume で再開する（ASKHUB_AUTO_RESUME=0 なら再開しない）
+#              ループが Claude の利用上限で止まったら、見張り役が解除の時刻まで待って resume で再開する（ASKHUB_AUTO_RESUME=0 なら再開しない）。
+#              回答待ちの PR を残して終わったら、見張り役が ask の回答を待ち、回答が付いたら resume で再開する（ASKHUB_AUTO_RESUME=0 なら再開しない）
 #   4. status: ループの状態を、状態用の Issue のこのループのコメントに、書き手 manual・回している人つきで書く（playbook の STEP D から呼ぶ。10 分に 1 回まで）
 #   5. resume: 回答が付いた後などに、記録した完了語でループを起動し直す（launch と同じく見張り役も起動する）
 #   6. final:  ループが終わったら、ゴール元の目印つきの最終 PR（epic-final）を作る。制御用 worktree の外から呼ぶ
 #              goal に未完了のタスクが残っていれば作らない（回答待ちの PR だけが残っているときは作る）
+#              resume で再開したループの後は、open な最終 PR の本文を今の内容で書き直す
 #              ふだんは見張り役が呼ぶ。手で呼ぶのは、見張り役が動かなかったとき（Mac の再起動など）や ASKHUB_AUTO_FINAL=0 のとき
 #   7. 終わり: 見張り役は、ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる）のを待ち、このループのコメントを消す。
 #              見張り役が動いていなかったときは、次の start（同じリポジトリのどの Discussion でも）が消す
@@ -90,6 +92,8 @@ use_loop() {
   RALPH_STATE="$CTL/.claude/ralph-state.local.md"
   PLAYBOOK="$CTL/.claude/ralph-playbook.local.md"
   PID_FILE="$CTL/.claude/askhub-loop.pid"
+  # 起動ロック（acquire_launch_lock）。名前は ralph-setup.sh が info/exclude に足す .claude/*.local.txt に合わせる（残っても git に載らない）
+  LAUNCH_LOCK="$CTL/.claude/askhub-launch.local.txt"
 }
 
 # kit 1.3 までに固定パス（<名前>-ralph-ctl）で始めた、その Discussion の手動ループがあるか。
@@ -204,6 +208,47 @@ loop_alive() {
   [[ -f "$PID_FILE" ]] || return 1
   pid=$(tr -d '[:space:]' < "$PID_FILE")
   [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# 起動ロック: 担当者の launch / resume と、見張り役の回答による再開が、同時にループを起動しないようにする。
+# ループが完了した後は state ファイルが無く、担当者の resume も .probe を作らないので、ファイルの有無では見分けられない。
+# ロックのファイルは set -C（O_EXCL）で作り、持ち主の PID を書く。持ち主が終わっていれば（fail で抜けた・強制終了された）、
+# 残ったロックは捨てて取り直す（trap は launch_loop が使うので、解放は呼び出し側が明示的に行う）。
+# ASKHUB_LAUNCH_LOCK が同じロックなら、呼び出し元（見張り役）が持っているので取らない。この先に起動するループ・見張り役には引き継がない
+LAUNCH_LOCK_OWNED=false
+acquire_launch_lock() {
+  local owner age
+  if [[ "${ASKHUB_LAUNCH_LOCK:-}" == "$LAUNCH_LOCK" ]]; then
+    unset ASKHUB_LAUNCH_LOCK
+    return 0
+  fi
+  mkdir -p "$(dirname "$LAUNCH_LOCK")"
+  if ( set -C; echo "$$" > "$LAUNCH_LOCK" ) 2>/dev/null; then
+    LAUNCH_LOCK_OWNED=true
+    return 0
+  fi
+  owner=$({ tr -d '[:space:]' < "$LAUNCH_LOCK"; } 2>/dev/null || true)
+  age=$(( $(date +%s) - $(mtime "$LAUNCH_LOCK") ))
+  # 持ち主が動いている（取ってから 10 分以内。それより古ければ PID の使い回しとみなす）・PID を書く前（取った直後）なら、起動の最中
+  if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null && (( age < 600 )); then return 1; fi
+  if [[ -z "$owner" ]] && (( age < 60 )); then return 1; fi
+  rm -f "$LAUNCH_LOCK"
+  if ( set -C; echo "$$" > "$LAUNCH_LOCK" ) 2>/dev/null; then
+    LAUNCH_LOCK_OWNED=true
+    return 0
+  fi
+  return 1
+}
+
+release_launch_lock() {
+  [[ "$LAUNCH_LOCK_OWNED" == true ]] || return 0
+  rm -f "$LAUNCH_LOCK"
+  LAUNCH_LOCK_OWNED=false
+}
+
+# 起動ロックを取れなかったときに止める（launch / resume）
+require_launch_lock() {
+  acquire_launch_lock || fail "Discussion #$LOOP_DISCUSSION のループを起動している最中です（見張り役が ask の回答を受けて再開しているかもしれません）。少し待ってから scripts/askhub-manual.sh status $LOOP_DISCUSSION で確かめてください"
 }
 
 # Discussion の ready-for-loop を外す（Discussion のラベルは REST で外せないので GraphQL を使う）
@@ -739,11 +784,15 @@ watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 # 見張り役: ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを待ち、このループを終える。
 # resume などで別のループが起動した・end で終えたら、何もせずに終わる（そちらに任せる）。
 # 記録・PID のファイルが消えても（作業場所を先に消したなど）待ち続ける（コメントを消すのに記録は要らない。終えると、次の start も見つけられない）。
-# 引き継ぐのは、このループの記録が残っているときだけ（固定パスの作業場所をオーケストレーターが作り直して、自分の PID を書いたときに終わらない）
+# 引き継ぐのは、このループの記録が残っているときだけ（固定パスの作業場所をオーケストレーターが作り直して、自分の PID を書いたときに終わらない）。
+# $1 が true（ループが完了語を出して終わった）なら、待っている間に回答待ちの PR の ask の回答を確かめ、付いていれば resume で再開する
 watch_until_closed() {
-  local noted=false pid ours
+  local answers="${1:-false}" noted=false pid ours interval
   while :; do
-    sleep "${ASKHUB_CLOSE_WATCH_INTERVAL:-600}"
+    # 回答待ちの ask があるうちは、回答を早く拾えるよう短い間隔で確かめる
+    interval="${ASKHUB_CLOSE_WATCH_INTERVAL:-600}"
+    if [[ "$answers" == true && -n "$(waiting_asks)" ]]; then interval="${ASKHUB_ANSWER_WATCH_INTERVAL:-120}"; fi
+    sleep "$interval"
     # リポジトリの checkout ごと消されたら（担当から外したなど）、待つ相手がいないので終わる
     [[ -d "$COMMON_DIR" ]] || return 0
     ours=false
@@ -753,7 +802,13 @@ watch_until_closed() {
     if [[ "$ours" == true ]] && { [[ -n "$pid" && "$pid" != "$WATCHED" ]] || [[ -n "$(state_get ended_at)" ]]; }; then
       return 0
     fi
-    [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" == true ]] || continue
+    if [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" != true ]]; then
+      # 再開したら、このループの見張りは新しいループの見張り役に任せる
+      if [[ "$answers" == true && "$ours" == true ]] && resume_after_answer; then
+        return 0
+      fi
+      continue
+    fi
     # このループの記録が無ければ、記録を作り直さずにコメントだけを消す（消した作業場所のディレクトリや、ほかのループの記録に書かない）
     if { [[ "$ours" == true ]] && end_loop >/dev/null; } || { [[ "$ours" != true ]] && delete_status_comments >/dev/null; }; then
       watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じたので、ループの状態のコメントを消しました"
@@ -769,6 +824,74 @@ watch_until_closed() {
       noted=true
     fi
   done
+}
+
+# goal の ※回答待ち の未完了タスクの「PR 番号 ask の id」（※回答待ち（PR #123 / ask id 456））。後続のタスクに付けた同じ印は 1 つにまとめる
+waiting_asks() {
+  [[ -f "$GOAL" ]] || return 0
+  { grep -E '^- \[ \].*※回答待ち' "$GOAL" 2>/dev/null || true; } \
+    | sed -n -E 's/.*※回答待ち（PR[[:space:]]*#([0-9]+)[[:space:]]*\/[[:space:]]*ask id[[:space:]]*([0-9]+)）.*/\1 \2/p' | sort -u
+}
+
+# 見張り役: ループが回答待ちの PR を残して終わった後、その ask に信用する author の回答が付いたら、resume で再開する
+# （オーケストレーターの自動ループと同じ。オーケストレーターは、手動ループの epic 宛ての PR の回答では再開しない）。
+# 回答は playbook の B-1 と同じく、ask の行コメントへの返信（in_reply_to_id が ask の id）だけを見る。
+# 再開に使った ask の id は記録し、同じ回答では再開し直さない（ループが回答を処理しないまま終わっても、起動を繰り返さない）。
+# 再開したら 0 を返す（このループの見張りは、新しいループの見張り役に任せる）。回答が無い・再開しなかったときは 1
+resume_after_answer() {
+  local asks resumed trusted pr ask logins login pid answered="" ids=""
+  asks=$(waiting_asks)
+  [[ -n "$asks" ]] || return 1
+  # 担当者の resume・launch が起動した・起動している最中（state ファイル・.probe・.saved がある）は、そちらに任せる
+  # （ファイルの無い間の起動は、下の起動ロックで見分ける）
+  [[ ! -e "$LOOP_STATE" && ! -e "$LOOP_STATE.probe" && ! -e "$LOOP_STATE.saved" ]] || return 1
+  resumed=$(state_get resumed_asks)
+  # 取得できない（空）ときは、誰の返信も回答とみなさない
+  trusted=$(trusted_authors 2>/dev/null) || return 1
+  [[ -n "$trusted" ]] || return 1
+  while read -r pr ask; do
+    [[ -n "$ask" && ",$resumed," != *",$ask,"* ]] || continue
+    # 取得に失敗した PR は、次の確認でやり直す。--paginate を付けないと、後ろのページの回答を見落とす
+    logins=$(gh api --paginate "repos/$REPOSITORY/pulls/$pr/comments" \
+      --jq ".[] | select(.in_reply_to_id == $ask) | .user.login" </dev/null 2>/dev/null) || continue
+    while IFS= read -r login; do
+      if is_trusted "$login" "$trusted"; then
+        answered="$answered${answered:+, }#$pr"
+        ids="$ids${ids:+,}$ask"
+        break
+      fi
+    done <<<"$logins"
+  done <<<"$asks"
+  [[ -n "$ids" ]] || return 1
+  # 担当者の launch / resume と同時に起動しないよう、起動ロックを取ってから確かめ直す
+  # （取れなければ、担当者が起動している最中。次の確認で、新しいループの PID を見て見張りを任せる）
+  acquire_launch_lock || return 1
+  pid=$({ tr -d '[:space:]' < "$PID_FILE"; } 2>/dev/null || true)
+  if [[ -e "$LOOP_STATE" || ( -n "$pid" && "$pid" != "$WATCHED" ) ]]; then
+    release_launch_lock
+    return 1
+  fi
+  # ループを起動する前に記録する（起動した後は、ループの status も記録ファイルを書き換える）
+  state_set resumed_asks "$resumed${resumed:+,}$ids"
+  watch_note "回答待ちの PR（${answered}）の ask に回答が付いたので、ループを再開します"
+  # resume は新しいループと、その見張り役を起動する。起動ロックはこちらが持ったまま、resume には取らせない
+  if (cd "$MAIN" && ASKHUB_LAUNCH_LOCK="$LAUNCH_LOCK" "$KIT_DIR/bin/askhub-manual.sh" resume "$LOOP_DISCUSSION"); then
+    release_launch_lock
+    return 0
+  fi
+  release_launch_lock
+  ANSWER_RESUME_FAILS=$(( ${ANSWER_RESUME_FAILS:-0} + 1 ))
+  if (( ANSWER_RESUME_FAILS < 3 )); then
+    # 記録を戻し、次の確認でやり直す
+    if [[ -n "$resumed" ]]; then state_set resumed_asks "$resumed"; else state_unset resumed_asks; fi
+    watch_note "ループを自動で再開できませんでした（${ANSWER_RESUME_FAILS} / 3 回目。次の確認でやり直します）"
+  else
+    watch_note "ループを自動で再開できませんでした（3 回続けて失敗したので、この回答ではもう再開しません。上のエラーを確かめて、scripts/askhub-manual.sh resume $LOOP_DISCUSSION を手で流してください）"
+    # 次に付いた別の ask の回答では、また 3 回まで試す
+    ANSWER_RESUME_FAILS=0
+  fi
+  write_status false true
+  return 1
 }
 
 # 見張り役: ループが Claude の利用上限で止まったら、解除の時刻（$1。UNIX 時刻）まで待ってから resume で再開する（オーケストレーターの自動ループと同じ）。
@@ -915,9 +1038,11 @@ NEXT
     fi
     [[ -n "$PROMISE" ]] || usage
     resolve_loop "$DISCUSSION"
+    require_launch_lock
     refresh_trusted_authors "$(trusted_authors)"
     state_set promise "$PROMISE"
     launch_loop "$PROMISE"
+    release_launch_lock
     ;;
 
   status)
@@ -940,19 +1065,24 @@ NEXT
   resume)
     [[ -z "${1:-}" || "$1" =~ ^[0-9]+$ ]] || usage
     resolve_loop "${1:-}"
+    require_launch_lock
     PROMISE=$(state_get promise)
     [[ -n "$PROMISE" ]] || fail "完了語の記録がありません（launch で起動してください）"
     # 片付け済みのスロットを作り直す
     setup_worktrees "$(state_get epic)"
     refresh_trusted_authors "$(trusted_authors)"
+    # 再開したループがまた完了したら、final が open な最終 PR の本文を今の内容で書き直す（回答待ちの PR の扱いが変わるため）
+    state_set final_refresh 1
     launch_loop "$PROMISE"
+    release_launch_lock
     ;;
 
   watch-final)
     # launch / resume が裏で起動する見張り役（担当者は呼ばない）。ループのプロセスが終わるのを待ち、
     # ループが完了語の promise を出して終わったときだけ final を流す（自動ループと同じく、異常終了したものには作らない）。
     # Claude の利用上限で止まったときは、解除の時刻まで待って resume で再開する（ASKHUB_AUTO_RESUME=0 なら再開しない）。
-    # そのあと、ゴール元の Discussion が閉じるのを待って、このループのコメントを消す（promise を出さずに終わったときも。Discussion を閉じてやめたときに残さない）
+    # そのあと、ゴール元の Discussion が閉じるのを待って、このループのコメントを消す（promise を出さずに終わったときも。Discussion を閉じてやめたときに残さない）。
+    # promise を出して終わったときは、待っている間に回答待ちの PR の ask に回答が付いたら resume で再開する（ASKHUB_AUTO_RESUME=0 なら再開しない）
     [[ "${1:-}" =~ ^[0-9]+$ && "${2:-}" =~ ^[0-9]+$ && -n "${3:-}" ]] || usage
     resolve_loop "$1"
     WATCHED="$2"
@@ -974,6 +1104,10 @@ NEXT
     # 残っていれば promise を出さずに終わった（API のエラーなどの異常終了）。
     # ralph-stop.sh で止めたとき・無進捗で止まったときも state ファイルは消えるので、ループの最後の出力（ログ）の promise でも確かめる
     PROMISE=$(state_get promise)
+    COMPLETED=false
+    if [[ ! -f "$LOOP_STATE" && -n "$PROMISE" ]] && grep -Fq "<promise>$PROMISE</promise>" "$WATCHED_LOG" 2>/dev/null; then
+      COMPLETED=true
+    fi
     # state ファイルが残り、ログの末尾が Claude の利用上限のメッセージなら、上限で止まった（解除の時刻は bin/usage-limit.sh が読む）
     RESET=""
     if [[ -f "$LOOP_STATE" ]]; then
@@ -987,7 +1121,7 @@ NEXT
       watch_note "ループが Claude の利用上限で止まりました。ASKHUB_AUTO_RESUME=0 のため、自動では再開しません（解除の時刻（$(local_time_of "$RESET")）の後に scripts/askhub-manual.sh resume ${LOOP_DISCUSSION}）"
     elif [[ "${ASKHUB_AUTO_FINAL:-1}" == 0 ]]; then
       : # 最終 PR は担当者が final で作る
-    elif [[ -f "$LOOP_STATE" || -z "$PROMISE" ]] || ! grep -Fq "<promise>$PROMISE</promise>" "$WATCHED_LOG" 2>/dev/null; then
+    elif [[ "$COMPLETED" != true ]]; then
       watch_note "ループが完了語を出さずに終わったため、最終 PR は作りません（続けるなら scripts/askhub-manual.sh resume ${LOOP_DISCUSSION}）"
     else
       watch_note "ループが完了語を出して終わったので、最終 PR を作ります"
@@ -995,7 +1129,13 @@ NEXT
         watch_note "最終 PR を作れませんでした（上のエラーを確かめて、scripts/askhub-manual.sh final $LOOP_DISCUSSION を手で流してください）"
       fi
     fi
-    watch_until_closed
+    # promise を出さずに終わったループは、回答が付いても再開しない（担当者が止めた・異常終了した理由を確かめてから resume する）
+    ANSWERS=false
+    if [[ "$COMPLETED" == true && "${ASKHUB_AUTO_RESUME:-1}" != 0 ]]; then ANSWERS=true; fi
+    if [[ "$COMPLETED" == true && "$ANSWERS" != true && -n "$(waiting_asks)" ]]; then
+      watch_note "回答待ちの PR があります。ASKHUB_AUTO_RESUME=0 のため、回答が付いても自動では再開しません（回答の後に scripts/askhub-manual.sh resume ${LOOP_DISCUSSION}）"
+    fi
+    watch_until_closed "$ANSWERS"
     ;;
 
   end)
@@ -1053,10 +1193,14 @@ NEXT
       waiting-to-start) fail "goal に未完了のタスクが残っています（${GOAL}）。scripts/askhub-manual.sh resume $LOOP_DISCUSSION でループを再開してください" ;;
       *) fail "ループの状態が「$(state_title "$FINAL_STATE")」のため、最終 PR を作れません" ;;
     esac
-    # マージせずに閉じた PR は既存として扱わない（作り直せるように）。open かマージ済みがあれば作らない
-    EXISTING=$(gh pr list -R "$REPOSITORY" --head "$EPIC" --base "$BASE_BRANCH" --state all --json url,state --jq '[.[] | select(.state != "CLOSED")][0].url // ""')
-    if [[ -n "$EXISTING" ]]; then
-      echo "最終 PR は既にあります: $EXISTING"
+    # マージせずに閉じた PR は既存として扱わない（作り直せるように）。open かマージ済みがあれば作らない。
+    # resume で再開した後の open な PR は、本文を今の内容で書き直す（オーケストレーターの自動ループと同じ）
+    EXISTING=$(gh pr list -R "$REPOSITORY" --head "$EPIC" --base "$BASE_BRANCH" --state all --json url,state \
+      --jq '[.[] | select(.state != "CLOSED")][0] | if . == null then "" else "\(.state) \(.url)" end')
+    EXISTING_STATE="${EXISTING%% *}"
+    EXISTING_URL="${EXISTING#* }"
+    if [[ -n "$EXISTING" && ( "$EXISTING_STATE" != OPEN || -z "$(state_get final_refresh)" ) ]]; then
+      echo "最終 PR は既にあります: $EXISTING_URL"
       exit 0
     fi
     SUMMARY=$(awk '/^## 最終 PR に載せる内容/{f=1; next} /^## /{f=0} f' "$RALPH_STATE" 2>/dev/null | grep -v '^<!--.*-->$' || true)
@@ -1069,8 +1213,16 @@ NEXT
     # 先頭の 2 行は、マージ時にゴール元の Discussion を閉じるワークフロー（close-goal-discussion.yml）が読む目印
     BODY=$(printf 'ゴール元: Discussion #%s\n<!-- ask-hub:discussion %s -->\n\n%s\n\n---\nこの PR は手動ループ（@%s）が作成しました。AskHub アプリの「要対応」タブの「マージ待ち」から確認して、merge commit でマージしてください。\n' \
       "$DISCUSSION" "$DISCUSSION" "$SUMMARY" "$(state_get runner)")
+    if [[ -n "$EXISTING" ]]; then
+      gh pr edit "$EXISTING_URL" -R "$REPOSITORY" --body "$BODY" >/dev/null
+      state_unset final_refresh
+      echo "再開したループの内容で、最終 PR の本文を書き直しました: $EXISTING_URL"
+      write_status true true
+      exit 0
+    fi
     URL=$(gh pr create -R "$REPOSITORY" --base "$BASE_BRANCH" --head "$EPIC" --title "【FEAT】$EPIC を $BASE_BRANCH に取り込む" \
       --assignee @me --label epic-final --body "$BODY")
+    state_unset final_refresh
     echo "最終 PR を作りました: $URL"
     if [[ "$BASE_BRANCH" != develop ]]; then
       echo "注意: base が develop ではないため、マージしてもゴール元の Discussion は自動で閉じません（close-goal-discussion.yml は develop へのマージだけを見る）。マージ後に Discussion #$DISCUSSION を手で閉じてください" >&2
