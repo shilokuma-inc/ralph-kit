@@ -27,6 +27,7 @@
 #   5. resume: 回答が付いた後などに、記録した完了語でループを起動し直す（launch と同じく見張り役も起動する）
 #   6. final:  ループが終わったら、ゴール元の目印つきの最終 PR（epic-final）を作る。制御用 worktree の外から呼ぶ
 #              goal に未完了のタスクが残っていれば作らない（回答待ちの PR だけが残っているときは作る）
+#              resume で再開したループの後は、open な最終 PR の本文を今の内容で書き直す
 #              ふだんは見張り役が呼ぶ。手で呼ぶのは、見張り役が動かなかったとき（Mac の再起動など）や ASKHUB_AUTO_FINAL=0 のとき
 #   7. 終わり: 見張り役は、ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる）のを待ち、このループのコメントを消す。
 #              見張り役が動いていなかったときは、次の start（同じリポジトリのどの Discussion でも）が消す
@@ -1011,6 +1012,8 @@ NEXT
     # 片付け済みのスロットを作り直す
     setup_worktrees "$(state_get epic)"
     refresh_trusted_authors "$(trusted_authors)"
+    # 再開したループがまた完了したら、final が open な最終 PR の本文を今の内容で書き直す（回答待ちの PR の扱いが変わるため）
+    state_set final_refresh 1
     launch_loop "$PROMISE"
     ;;
 
@@ -1130,10 +1133,14 @@ NEXT
       waiting-to-start) fail "goal に未完了のタスクが残っています（${GOAL}）。scripts/askhub-manual.sh resume $LOOP_DISCUSSION でループを再開してください" ;;
       *) fail "ループの状態が「$(state_title "$FINAL_STATE")」のため、最終 PR を作れません" ;;
     esac
-    # マージせずに閉じた PR は既存として扱わない（作り直せるように）。open かマージ済みがあれば作らない
-    EXISTING=$(gh pr list -R "$REPOSITORY" --head "$EPIC" --base "$BASE_BRANCH" --state all --json url,state --jq '[.[] | select(.state != "CLOSED")][0].url // ""')
-    if [[ -n "$EXISTING" ]]; then
-      echo "最終 PR は既にあります: $EXISTING"
+    # マージせずに閉じた PR は既存として扱わない（作り直せるように）。open かマージ済みがあれば作らない。
+    # resume で再開した後の open な PR は、本文を今の内容で書き直す（オーケストレーターの自動ループと同じ）
+    EXISTING=$(gh pr list -R "$REPOSITORY" --head "$EPIC" --base "$BASE_BRANCH" --state all --json url,state \
+      --jq '[.[] | select(.state != "CLOSED")][0] | if . == null then "" else "\(.state) \(.url)" end')
+    EXISTING_STATE="${EXISTING%% *}"
+    EXISTING_URL="${EXISTING#* }"
+    if [[ -n "$EXISTING" && ( "$EXISTING_STATE" != OPEN || -z "$(state_get final_refresh)" ) ]]; then
+      echo "最終 PR は既にあります: $EXISTING_URL"
       exit 0
     fi
     SUMMARY=$(awk '/^## 最終 PR に載せる内容/{f=1; next} /^## /{f=0} f' "$RALPH_STATE" 2>/dev/null | grep -v '^<!--.*-->$' || true)
@@ -1146,8 +1153,16 @@ NEXT
     # 先頭の 2 行は、マージ時にゴール元の Discussion を閉じるワークフロー（close-goal-discussion.yml）が読む目印
     BODY=$(printf 'ゴール元: Discussion #%s\n<!-- ask-hub:discussion %s -->\n\n%s\n\n---\nこの PR は手動ループ（@%s）が作成しました。AskHub アプリの「要対応」タブの「マージ待ち」から確認して、merge commit でマージしてください。\n' \
       "$DISCUSSION" "$DISCUSSION" "$SUMMARY" "$(state_get runner)")
+    if [[ -n "$EXISTING" ]]; then
+      gh pr edit "$EXISTING_URL" -R "$REPOSITORY" --body "$BODY" >/dev/null
+      state_unset final_refresh
+      echo "再開したループの内容で、最終 PR の本文を書き直しました: $EXISTING_URL"
+      write_status true true
+      exit 0
+    fi
     URL=$(gh pr create -R "$REPOSITORY" --base "$BASE_BRANCH" --head "$EPIC" --title "【FEAT】$EPIC を $BASE_BRANCH に取り込む" \
       --assignee @me --label epic-final --body "$BODY")
+    state_unset final_refresh
     echo "最終 PR を作りました: $URL"
     if [[ "$BASE_BRANCH" != develop ]]; then
       echo "注意: base が develop ではないため、マージしてもゴール元の Discussion は自動で閉じません（close-goal-discussion.yml は develop へのマージだけを見る）。マージ後に Discussion #$DISCUSSION を手で閉じてください" >&2
