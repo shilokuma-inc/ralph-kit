@@ -968,11 +968,24 @@ echo '[{"id":70,"in_reply_to_id":null,"user":{"login":"test"},"body":"ask"},
   {"id":72,"in_reply_to_id":69,"user":{"login":"test"},"body":"回答: B"}]' > "$GH_STATE/pulls/7.json"
 sleep 4
 [[ "$(loop_log "$D114")" == "$LOG_114" ]] || fail "信用しない author の返信か、ほかのコメントへの返信で再開した: $(cat "$LOG_114")"
+[[ ! -e "$D114/.claude/askhub-launch.local.txt" ]] || fail "launch が終わったのに、起動ロックが残っている"
+# 起動ロックを持つ人（担当者の launch / resume）がいる間は、回答が付いても再開しない。担当者の resume も、ロックを取れなければ断る
+sleep 600 &
+HOLDER=$!
+echo "$HOLDER" > "$D114/.claude/askhub-launch.local.txt"
 echo '[{"id":70,"in_reply_to_id":null,"user":{"login":"test"},"body":"ask"},
   {"id":73,"in_reply_to_id":70,"user":{"login":"test"},"body":"回答: A"}]' > "$GH_STATE/pulls/7.json"
+if manual resume 114 >"$WORK/locked.out" 2>&1; then fail "起動ロックを取れないのに、resume が起動した"; fi
+grep -q '起動している最中です' "$WORK/locked.out" || fail "起動ロックを取れないことを知らせていない: $(cat "$WORK/locked.out")"
+sleep 4
+[[ "$(loop_log "$D114")" == "$LOG_114" ]] || fail "起動ロックを持つ人がいるのに、回答で再開した: $(cat "$LOG_114")"
+# 持ち主が終わったロック（fail で抜けた・強制終了された）は、捨てて取り直す
+kill "$HOLDER"
+wait "$HOLDER" 2>/dev/null || true
 wait_for eval '[[ "$(loop_log "$D114")" != "$LOG_114" ]]' || fail "ask に回答が付いても、ループを再開していない: $(cat "$LOG_114")"
 grep -q '回答待ちの PR（#7）の ask に回答が付いたので、ループを再開します' "$LOG_114" || fail "回答で再開したことを、終わったループのログに書いていない: $(cat "$LOG_114")"
 grep -q '^resumed_asks=70$' "$D114/.claude/askhub-manual.local.txt" || fail "再開に使った ask の id を記録していない"
+wait_for eval '[[ ! -e "$D114/.claude/askhub-launch.local.txt" ]]' || fail "回答で再開した後も、起動ロックが残っている"
 LOG_114B=$(loop_log "$D114")
 wait_watch "$LOG_114B"
 grep -q -- '^pr edit https://github.com/example/myapp-ios/pull/99 ' "$WORK/gh.log" || fail "再開したループが完了したのに、最終 PR の本文を書き直していない: $(cat "$LOG_114B")"
