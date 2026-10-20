@@ -887,6 +887,8 @@ resume_after_answer() {
     watch_note "ループを自動で再開できませんでした（${ANSWER_RESUME_FAILS} / 3 回目。次の確認でやり直します）"
   else
     watch_note "ループを自動で再開できませんでした（3 回続けて失敗したので、この回答ではもう再開しません。上のエラーを確かめて、scripts/askhub-manual.sh resume $LOOP_DISCUSSION を手で流してください）"
+    # 次に付いた別の ask の回答では、また 3 回まで試す
+    ANSWER_RESUME_FAILS=0
   fi
   write_status false true
   return 1
