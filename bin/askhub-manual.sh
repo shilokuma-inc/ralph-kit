@@ -29,7 +29,8 @@
 #              goal に未完了のタスクが残っていれば作らない（回答待ちの PR だけが残っているときは作る）
 #              resume で再開したループの後は、open な最終 PR の本文を今の内容で書き直す
 #              ふだんは見張り役が呼ぶ。手で呼ぶのは、見張り役が動かなかったとき（Mac の再起動など）や ASKHUB_AUTO_FINAL=0 のとき
-#   7. 終わり: 見張り役は、ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる）のを待ち、このループのコメントを消す。
+#   7. 終わり: 見張り役は、ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる）のを待ち、このループのスロット用の Simulator
+#              （playbook に UDID を書いた <アプリ名> d<番号>-…）とコメントを消す（ASKHUB_DELETE_SIMULATORS=0 なら Simulator は消さない）。
 #              見張り役が動いていなかったときは、次の start（同じリポジトリのどの Discussion でも）が消す
 #      end:    Discussion を閉じずにループをやめるときに、このループのコメントを消す
 #
@@ -558,7 +559,7 @@ end_loop() {
   state_set ended_at "$(iso_now)"
 }
 
-# この Mac のほかの手動ループのうち、ゴール元の Discussion が閉じたもののコメントを消す
+# この Mac のほかの手動ループのうち、ゴール元の Discussion が閉じたもののコメントとスロット用の Simulator を消す
 # （見張り役が、Discussion が閉じるのを待てなかったとき（Mac の再起動など）の後片付け）
 sweep_finished_loops() {
   local n ctl
@@ -569,9 +570,74 @@ sweep_finished_loops() {
     (
       use_loop "$n" "$ctl"
       if loop_alive; then exit 0; fi
+      delete_loop_simulators echo || true
       end_loop >/dev/null && echo "Discussion #$n の手動ループは終わっている（Discussion が閉じている）ので、ループの状態のコメントを消しました"
     ) </dev/null || true
   done < <(manual_loops)
+}
+
+# ---- スロット用の Simulator ----------------------------------------------------------------
+# 準備の Claude は、スロットごとに専用の Simulator（<アプリ名> d<N>-<スロットなど>。例: AskHub d743-a・PrimePick d409-ipad-b）を作り、
+# UDID を playbook の「このアプリ固有の前提」に書く。1 台 2〜4 GB あり、残すと担当者の Mac のディスクを使い切るので、
+# ゴール元の Discussion が閉じたら見張り役（見張り役が動いていなかったときは次の start の片付け）が消す。
+# アプリ名はリポジトリの名前から決まらない（ask-hub-apple は AskHub）ので、playbook に UDID を書いた Simulator の名前から求め、
+# 同じ「<アプリ名> d<N>-」で始まる Simulator を消す（playbook に書き足し忘れた、そのループの Simulator も消す）。
+# 名前は正規表現を使わず字面の前方一致で比べ、d<N>- まで含める（d74 で d743 の Simulator を消さない）。
+# ほかのアプリ（同じ番号のものも）・ほかのループ・手で作った Simulator は消さない。アプリ名が 1 つに決まらなければ何も消さない
+
+# このループのスロット用の Simulator（「UDID<TAB>状態<TAB>名前」）。playbook が無い・xcrun が無い（Linux など）ときは空。
+# 一覧を取れないとき・アプリ名が 1 つに決まらないときは、理由を出して失敗にする
+loop_simulators() {
+  local udids devices udid state name prefix="" found="" marker=" d$LOOP_DISCUSSION-"
+  [[ -f "$PLAYBOOK" ]] || return 0
+  command -v xcrun >/dev/null 2>&1 || return 0
+  udids=$(grep -oE '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' "$PLAYBOOK" | tr '[:lower:]' '[:upper:]' | sort -u || true)
+  [[ -n "$udids" ]] || return 0
+  if ! devices=$(xcrun simctl list devices --json 2>/dev/null | jq -r '.devices[][] | [.udid, .state, .name] | @tsv'); then
+    warn "Simulator の一覧を取得できないため、スロット用の Simulator を消せません（xcrun simctl list devices）"
+    return 1
+  fi
+  # playbook に UDID を書いた Simulator のうち、名前が「<アプリ名> d<N>-…」のものからアプリ名を求める
+  while IFS=$'\t' read -r udid state name; do
+    [[ -n "$udid" && "$name" == *"$marker"* ]] || continue
+    grep -Fqx -- "$(printf '%s' "$udid" | tr '[:lower:]' '[:upper:]')" <<<"$udids" || continue
+    prefix="${name%%"$marker"*}"
+    [[ -n "$prefix" ]] || continue
+    if [[ -z "$found" ]]; then
+      found="$prefix"
+    elif [[ "$found" != "$prefix" ]]; then
+      warn "playbook に、アプリ名の違うこのループの番号の Simulator（${found}${marker}…・${prefix}${marker}…）が書かれているため、スロット用の Simulator を消しません"
+      return 1
+    fi
+  done <<<"$devices"
+  [[ -n "$found" ]] || return 0
+  while IFS=$'\t' read -r udid state name; do
+    if [[ -n "$udid" && "$name" == "$found$marker"?* ]]; then
+      printf '%s\t%s\t%s\n' "$udid" "$state" "$name"
+    fi
+  done <<<"$devices"
+  return 0
+}
+
+# このループのスロット用の Simulator を消す（Shutdown でなければ先に shutdown する）。$1 は 1 行ずつ結果を書く関数（watch_note・echo）。
+# ASKHUB_DELETE_SIMULATORS=0 なら消さない。消せないものがあれば失敗にする（ほかの Simulator は消し続ける）
+delete_loop_simulators() {
+  local report="$1" sims udid state name failed=false
+  [[ "${ASKHUB_DELETE_SIMULATORS:-1}" != 0 ]] || return 0
+  sims=$(loop_simulators) || return 1
+  [[ -n "$sims" ]] || return 0
+  while IFS=$'\t' read -r udid state name; do
+    if [[ "$state" != Shutdown ]]; then
+      xcrun simctl shutdown "$udid" >/dev/null 2>&1 || true
+    fi
+    if xcrun simctl delete "$udid" >/dev/null 2>&1; then
+      "$report" "スロット用の Simulator を消しました: ${name}（${udid}）"
+    else
+      "$report" "スロット用の Simulator を消せませんでした: ${name}（${udid}）。xcrun simctl delete ${udid} で消してください"
+      failed=true
+    fi
+  done <<<"$sims"
+  [[ "$failed" != true ]]
 }
 
 # ---- ループの起動 --------------------------------------------------------------------------
@@ -781,13 +847,14 @@ start_final_watch() {
 # 見張り役がループのログに書く 1 行
 watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
-# 見張り役: ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを待ち、このループを終える。
+# 見張り役: ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを待ち、
+# このループのスロット用の Simulator を消して、このループを終える。
 # resume などで別のループが起動した・end で終えたら、何もせずに終わる（そちらに任せる）。
 # 記録・PID のファイルが消えても（作業場所を先に消したなど）待ち続ける（コメントを消すのに記録は要らない。終えると、次の start も見つけられない）。
 # 引き継ぐのは、このループの記録が残っているときだけ（固定パスの作業場所をオーケストレーターが作り直して、自分の PID を書いたときに終わらない）。
 # $1 が true（ループが完了語を出して終わった）なら、待っている間に回答待ちの PR の ask の回答を確かめ、付いていれば resume で再開する
 watch_until_closed() {
-  local answers="${1:-false}" noted=false pid ours interval
+  local answers="${1:-false}" noted=false simulators_checked=false pid ours interval
   while :; do
     # 回答待ちの ask があるうちは、回答を早く拾えるよう短い間隔で確かめる
     interval="${ASKHUB_CLOSE_WATCH_INTERVAL:-600}"
@@ -808,6 +875,12 @@ watch_until_closed() {
         return 0
       fi
       continue
+    fi
+    # スロット用の Simulator は、閉じたのを最初に見たときに 1 回だけ消す（消せなかったものはログに書き、担当者に任せる）。
+    # このループの記録が無ければ消さない（制御用 worktree の playbook が、もうこのループのものとは限らない）
+    if [[ "$simulators_checked" != true ]]; then
+      simulators_checked=true
+      if [[ "$ours" == true ]]; then delete_loop_simulators watch_note || true; fi
     fi
     # このループの記録が無ければ、記録を作り直さずにコメントだけを消す（消した作業場所のディレクトリや、ほかのループの記録に書かない）
     if { [[ "$ours" == true ]] && end_loop >/dev/null; } || { [[ "$ours" != true ]] && delete_status_comments >/dev/null; }; then
