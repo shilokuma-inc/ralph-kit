@@ -32,7 +32,7 @@
 #   7. 終わり: 見張り役は、ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる）のを待ち、このループのスロット用の Simulator
 #              （playbook に UDID を書いた <アプリ名> d<番号>-…）とコメントを消す（ASKHUB_DELETE_SIMULATORS=0 なら Simulator は消さない）。
 #              見張り役が動いていなかったときは、次の start（同じリポジトリのどの Discussion でも）が消す
-#      end:    Discussion を閉じずにループをやめるときに、このループのコメントを消す
+#      end:    Discussion を閉じずにループをやめるときに、このループのコメントを消す（作業場所・スロット用の Simulator は消さず、消し方を表示する）
 #
 # 必要なもの: gh（このリポジトリに書き込み権限のあるアカウントでログイン済み）・git・jq・claude（ralph-loop プラグイン入り。
 #             ASKHUB_AGENT=opencode のときは claude の代わりに OpenCode の CLI）
@@ -606,7 +606,7 @@ loop_simulators() {
     if [[ -z "$found" ]]; then
       found="$prefix"
     elif [[ "$found" != "$prefix" ]]; then
-      warn "playbook に、アプリ名の違うこのループの番号の Simulator（${found}${marker}…・${prefix}${marker}…）が書かれているため、スロット用の Simulator を消しません"
+      warn "playbook に、アプリ名の違うこのループの番号の Simulator（${found}${marker}…・${prefix}${marker}…）が書かれているため、スロット用の Simulator を決められません（消しません）"
       return 1
     fi
   done <<<"$devices"
@@ -1228,6 +1228,18 @@ NEXT
   (cd "$CTL" && "$KIT_DIR/bin/ralph-stop.sh" --worktrees)   # スロット（${CTL%-ctl}-a / -b）
   git -C "$MAIN" worktree remove "$CTL"                        # 制御用 worktree
 NEXT
+    fi
+    # スロット用の Simulator も消さない（resume で続けると、playbook に書いた UDID をまた使う）
+    SIMULATORS=$(loop_simulators || true)
+    if [[ -n "$SIMULATORS" ]]; then
+      echo "スロット用の Simulator も残しています。要らなければ、次で消してください:"
+      while IFS=$'\t' read -r udid state name; do
+        if [[ "$state" == Shutdown ]]; then
+          printf '  xcrun simctl delete %s   # %s\n' "$udid" "$name"
+        else
+          printf '  xcrun simctl shutdown %s; xcrun simctl delete %s   # %s\n' "$udid" "$udid" "$name"
+        fi
+      done <<<"$SIMULATORS"
     fi
     ;;
 
