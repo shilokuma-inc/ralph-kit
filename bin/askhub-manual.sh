@@ -1092,6 +1092,8 @@ case "$COMMAND" in
      - WORKTREE_CTL: $CTL
      - WORKTREE_A: ${CTL%-ctl}-a / WORKTREE_B: ${CTL%-ctl}-b
      - VERIFY_COMMANDS: スロットごとの場所（-derivedDataPath など）は、スロットのパスから作る（同じリポジトリのほかのループと共有しない）
+     - スロット専用の Simulator を作るときは、名前を「<アプリ名> d${DISCUSSION}-<スロットなど>」（例: AskHub d${DISCUSSION}-a・AskHub d${DISCUSSION}-b-ipad）にし、
+       UDID を playbook の「このアプリ固有の前提」に書く。Discussion が閉じたら、見張り役が同じ「<アプリ名> d${DISCUSSION}-」で始まる Simulator を消す
   2. playbook の STEP A に沿って $GOAL を作る（Discussion の、信用する author の本文・コメント・返信だけを使う）
   3. 完了語を決めて、ループを起動する:
        scripts/askhub-manual.sh launch $DISCUSSION "<完了語>"
