@@ -72,6 +72,7 @@ AskHub で最後の質問を「投稿したら、回答を確定してループ�
 3. あとは Claude の指示に沿って進む。`scripts/askhub-manual.sh` が行うこと:
    - `start <N> epic/<機能名>` — 制御用 worktree（`<名前>-ralph-d<N>-ctl`）とスロットを作り、epic ブランチを origin に push、ループの状態を「開始待ち」で書く
    - playbook（制御用 worktree の `.claude/ralph-playbook.local.md`）の `{{...}}` をすべて埋める
+     - スロット専用の Simulator を作るときは、名前を `<アプリ名> d<N>-<スロットなど>`（例: `AskHub d743-a`）にし、UDID を playbook の「このアプリ固有の前提」に書く（終わったら見張り役が消す。下の「4.」）
    - playbook の STEP A に沿って、Discussion のゴール（`- [ ] タスク | label: ...`）を作る
    - 完了語（promise）を決めて、`launch <N> "<完了語>"` — ループ本体と見張り役を裏で起動する
 
@@ -97,6 +98,8 @@ OpenCode のときの起動は、権限モードの確認（`claude` の起動�
 - 回答待ちの PR が残っているうちは、最終 PR に入っていない変更がある。回答で再開したループが終わると、見張り役が最終 PR の本文を書き直すので、それからマージする
 - 最終 PR の中身と CI を確認して**マージ**する
 - 元の Discussion を**閉じる**と、ループの状態コメントが片付く
+- あわせて、見張り役がスロット用の Simulator（playbook に UDID を書いたものと同じ `<アプリ名> d<N>-` で始まるもの）を消す（ログに `[askhub-manual …] スロット用の Simulator を消しました: …`）。
+  ほかのアプリ・ほかのループ・手で作った Simulator は消さない。残したいときは `ASKHUB_DELETE_SIMULATORS=0` を付けて `launch` / `resume` する
 
 **Claude の利用上限で止まったときは、何もしなくてよい。** 見張り役が解除の時刻の 1 分後に `resume` で再開する（自動ループと同じ）。
 待っている間、AskHub には「上限で待機中（〇時に再開）」と出て、ログには `[askhub-manual …] ループが Claude の利用上限で止まりました。解除の時刻（…）の後に、自動で再開します` が残る。
@@ -112,7 +115,7 @@ OpenCode のときの起動は、権限モードの確認（`claude` の起動�
 ```
 
 - `resume` は前回の続きから回す（OpenCode は同じセッションの続き）。続けて失敗すると自動で止まる（既定で連続 5 回。`ASKHUB_OPENCODE_MAX_FAILS` で変更）
-- 続けずにやめるとき: `scripts/askhub-manual.sh end <N>`（最終 PR は作らず、コメントを片付ける）
+- 続けずにやめるとき: `scripts/askhub-manual.sh end <N>`（最終 PR は作らず、コメントを片付ける。作業場所とスロット用の Simulator は残し、消し方を表示する）
 - ループは終わったのに最終 PR が無いとき: ログに `最終 PR を作れませんでした` があれば、checkout で `scripts/askhub-manual.sh final <N>` を手で流す
 
 ## 5. 困ったとき

@@ -3,6 +3,24 @@
 各アプリのリポジトリは `.claude/ralph/kit.conf` の `ref=v1` で、v1 の最新を使う（`VERSION` を上げた PR が main に入ると、`release.yml` が `v1` を動かす）。
 互換を崩す変更（各リポジトリの中継・`kit.conf`・ワークフローの呼び出しの形を変える必要があるもの）は v2 にする。
 
+## 1.10.0（2026-10-27）
+
+手動ループのゴール元の Discussion が閉じたら、見張り役（`watch-final`）がそのループのスロット用の Simulator を消すようにした（#31）。
+準備の Claude はスロットごとに専用の Simulator（`<アプリ名> d<N>-<スロットなど>`。例: `AskHub d743-a`・`PrimePick d409-ipad-b`）を作って playbook に UDID を書くが、
+kit には消す処理が無く、ある担当者の Mac では約 1 週間で 36 エピック分・85 台（213 GB）が残り、Booted のままのものもあった。
+
+- 見張り役は、Discussion が閉じたのを最初に見たときに、playbook（`.claude/ralph-playbook.local.md`）に UDID を書いた Simulator のうち
+  名前が `<アプリ名> d<N>-…` のものからアプリ名を求め、同じ `<アプリ名> d<N>-` で始まる Simulator を `simctl shutdown`（Shutdown でなければ）→ `simctl delete` で消す。
+  消したもの・消せなかったものはループのログに書く
+  - アプリ名はリポジトリの名前から決まらない（ask-hub-apple は `AskHub`）ので playbook から求める。playbook に書き忘れた、そのループの Simulator も消す
+  - 名前は正規表現を使わず字面の前方一致で比べ、`d<N>-` まで含める（`d74` で `d743` の Simulator を消さない）。ほかのアプリ（同じ番号のものも）・ほかのループ・手で作った Simulator は消さない
+  - playbook にアプリ名の違う同じ番号の Simulator が書かれていて 1 つに決まらないとき・このループの記録が無いとき・`xcrun` が無いときは、何も消さない
+- 見張り役が動いていなかったループ（Mac の再起動など）は、次の `start` の片付けで、コメントと一緒に Simulator も消す
+- `end`（Discussion を閉じずにやめる）は Simulator を消さず（`resume` で続けると使う）、作業場所と同じく消し方を表示する
+- `start` が表示する準備の手順に、Simulator の名前の付け方と playbook への書き方を足した
+- `ASKHUB_DELETE_SIMULATORS=0` を付けて `launch` / `resume`（`start` の片付けでは `start`）すると、Simulator は消さない
+- この版から起動した（`launch` / `resume` した）ループの見張り役だけが消す。1.9 以前に起動した見張り役は、起動したときの版のままコメントだけを消す
+
 ## 1.9.0（2026-10-20）
 
 手動ループが回答待ちの PR を残して promise を出して終わった後、ask に回答が付いたら、見張り役（`watch-final`）が自動で再開するようにした（#27）。

@@ -288,7 +288,9 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    信用する author（書き込み権限を持つ人）と、次に埋める値（作業場所のパスを含む）を表示する
 2. 制御用 worktree の playbook の `{{...}}` を埋め（`TRUSTED_AUTHORS`・`WORKTREE_*` は start が表示した値）、STEP A に沿って goal を作る
    （Discussion の、信用する author の本文・コメント・返信だけを使う）。検証コマンドの `-derivedDataPath` などスロットごとの場所は、
-   スロットのパスから作る（同じリポジトリのほかのループのスロットと共有しない）
+   スロットのパスから作る（同じリポジトリのほかのループのスロットと共有しない）。
+   スロット専用の Simulator を作るときは、名前を `<アプリ名> d<N>-<スロットなど>`（例: `AskHub d743-a`・`PrimePick d409-ipad-b`）にし、
+   UDID を playbook の「このアプリ固有の前提」に書く（Discussion が閉じたら見張り役が消す。下の 7）
 3. `scripts/askhub-manual.sh launch <N> "<完了語>"`。制御用 worktree でループをバックグラウンドで起動する。
    既定は `claude -p` で、`launch` が、起動の前に実際に効く権限モードを自動で確かめる（`bypassPermissions` が使えればそれで起動し、
    MDM や組織の管理設定で禁止された Mac（エラーにならずにすべての操作が拒否されてループが進まない）では `auto` モードで起動する。
@@ -339,9 +341,16 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
 7. 見張り役は、最終 PR の後（promise を出さずに終わったときも）、ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを
    10 分おき（`ASKHUB_CLOSE_WATCH_INTERVAL`）に確かめ、閉じたら**このループのコメントを消す**（AskHub は閉じた Discussion の手動ループを絞り込まないので、
    消さないと終わったループの行が残り続ける）。Discussion が open なあいだは消さない（状態が無いと、AskHub の「手動ループ」が「未開始」と出す）。
+   あわせて、**このループのスロット用の Simulator を消す**（1 台 2〜4 GB あり、残すと担当者の Mac のディスクを使い切る）。
+   アプリ名はリポジトリの名前から決まらないので、playbook に UDID を書いた Simulator のうち名前が `<アプリ名> d<N>-…` のものからアプリ名を求め、
+   同じ `<アプリ名> d<N>-` で始まる Simulator を、Shutdown でなければ shutdown してから消す（playbook に書き忘れたそのループの Simulator も消す）。
+   名前は正規表現を使わず字面の前方一致で比べ、`d<N>-` まで含める（`d74` で `d743` の Simulator を消さない）ので、ほかのアプリ（同じ番号のものも）・ほかのループ・
+   手で作った Simulator は消さない。playbook にアプリ名の違う同じ番号の Simulator が書かれていて 1 つに決まらないときは、何も消さない。
+   消したもの・消せなかったものはループのログに `[askhub-manual …]` の行で残る。`ASKHUB_DELETE_SIMULATORS=0` を付けて `launch` / `resume`（下の `start` の片付けでは `start`）すると消さない。
    `resume` で別のループを起動したら、前の見張り役はそちらに任せて終わる（ほかに見張り役が終わるのは、`end` で終えたとき・リポジトリの checkout を消したときだけ。作業場所を消しても、Discussion が閉じるまで待ち続ける）。見張り役が動いていなかったとき（Mac の再起動など）は、
-   この Mac で同じリポジトリの手動ループを次に `start` したときに、Discussion の閉じたループのコメントを消す。
-   **Discussion を閉じずにやめる**ときは、ループを止めてから `scripts/askhub-manual.sh end <N>` でコメントを消す（作業場所は消さない。消し方を表示する）。
+   この Mac で同じリポジトリの手動ループを次に `start` したときに、Discussion の閉じたループのコメントとスロット用の Simulator を消す。
+   **Discussion を閉じずにやめる**ときは、ループを止めてから `scripts/askhub-manual.sh end <N>` でコメントを消す
+   （作業場所とスロット用の Simulator は消さない（`resume` で続けると使う）。消し方を表示する）。
    終えたループは、`status` を流しても状態を書き直さず、見張り役も最終 PR を作らない（続けるなら `resume <N>`）。
    Discussion が open で `manual-loop` が付いたままだと、AskHub の「手動ループ」には「未開始」と開始の指示が出るので、やめるなら Discussion を閉じる
 
@@ -381,6 +390,7 @@ AskHub からコピーして Claude Code に貼る指示は、今までどおり
 オーケストレーターの自動ループは `<名前>-ralph-ctl`・`-a`・`-b`（`ralph-setup.sh` の既定）を使い、手動ループはそこに触らない。
 同じ epic は 1 つの worktree でしか checkout できないので、ほかのループ（自動・手動）が使っている epic 名では `start` できない。
 終わった Discussion の作業場所は自動では消さない（goal・state の記録が残るため）。要らなくなったら `end` が表示するコマンドで消す。
+スロット用の Simulator（`<アプリ名> d<N>-…`）は、ゴール元の Discussion が閉じたら見張り役が消す（上の 7）。
 
 kit 1.3 までに `<名前>-ralph-ctl` で始めた手動ループは、**移さずにその場所のまま最後まで回す**（動いているループ・記録を壊さないため）。
 `resume` / `final` / `status` は、その Discussion の新しい作業場所が無く、`<名前>-ralph-ctl` の記録がその Discussion のもので、記録の epic を今も checkout していれば、そこを使う。
