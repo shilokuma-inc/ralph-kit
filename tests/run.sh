@@ -900,10 +900,16 @@ grep '"discussion":110,.*"state":"usage-limited"' "$WORK/gh.log" | grep -q '"usa
   || fail "上限で待機中の状態に、解除の時刻を書いていない: $(grep '"discussion":110,' "$WORK/gh.log")"
 grep -q '^| 上限の解除 | ' "$WORK/gh.log" || fail "コメントの表に、上限の解除の時刻を書いていない: $(grep -A 12 '"discussion":110,.*"state":"usage-limited"' "$WORK/gh.log")"
 grep -q '利用上限で止まりました' "$LOG_110" || fail "利用上限で止まったことを、ループのログに書いていない: $(cat "$LOG_110")"
-# 解除の時刻（偽の claude が上限のメッセージに書いた時刻）を過ぎてから、再開を待つ
+# 解除の時刻（偽の claude が上限のメッセージに書いた時刻）を過ぎてから、再開を待つ。それまでに再開したら落とす
+# （ログの場所を読んでから時刻を比べる。逆の順だと、解除の時刻ちょうどの正しい再開を、早すぎる再開と取り違える）
 RESET_110=$(sed -n 's/^Claude AI usage limit reached|//p' "$LOG_110")
 [[ "$RESET_110" =~ ^[0-9]+$ ]] || fail "ループのログに、上限のメッセージが無い: $(cat "$LOG_110")"
-while (( $(date +%s) < RESET_110 )); do sleep 1; done
+while :; do
+  CURRENT_110=$(loop_log "$D110")
+  (( $(date +%s) < RESET_110 )) || break
+  [[ "$CURRENT_110" == "$LOG_110" ]] || fail "解除の時刻より前に、ループを再開した: $(cat "$LOG_110")"
+  sleep 1
+done
 wait_for eval '[[ "$(loop_log "$D110")" != "$LOG_110" ]]' || fail "解除の時刻を過ぎても、ループを再開していない: $(cat "$LOG_110")"
 grep -q '解除の時刻を過ぎたので、ループを再開します' "$LOG_110" || fail "再開したことを、止まったループのログに書いていない"
 wait_watch "$(loop_log "$D110")"
