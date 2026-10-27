@@ -203,7 +203,7 @@ fi
 CLAUDE
 # テスト用の xcrun。simctl の list devices --json・shutdown・delete だけを、SIM_STATE/devices/<UDID>/{name,state} の Simulator で行う
 # （担当者の Mac で流しても、本物の Simulator には触らない）。本物と同じく、Shutdown の Simulator は shutdown できず、Shutdown でない Simulator は delete できない。
-# 呼ばれた引数を SIM_STATE/log に書き足す
+# SIM_STATE/devices/<UDID>/stuck があれば、その Simulator は shutdown できない（固まった Simulator）。呼ばれた引数を SIM_STATE/log に書き足す
 cat > "$WORK/bin/xcrun" <<'XCRUN'
 #!/bin/bash
 S="${SIM_STATE:?}"
@@ -219,6 +219,7 @@ case "${2:-}" in
   shutdown)
     [[ -d "$S/devices/${3:-}" ]] || { echo "Invalid device: ${3:-}" >&2; exit 164; }
     [[ "$(cat "$S/devices/$3/state")" != Shutdown ]] || { echo "Unable to shutdown device in current state: Shutdown" >&2; exit 149; }
+    [[ ! -e "$S/devices/$3/stuck" ]] || { echo "Unable to shutdown device: Operation timed out" >&2; exit 60; }
     printf '%s' Shutdown > "$S/devices/$3/state" ;;
   delete)
     [[ -d "$S/devices/${3:-}" ]] || { echo "Invalid device: ${3:-}" >&2; exit 164; }
@@ -1064,9 +1065,13 @@ add_slot_table() { # $1=Discussion の番号。playbook の「このアプリ固
 S120A=12000000-0000-4000-8000-00000000000A
 S120B=12000000-0000-4000-8000-00000000000B
 S120I=12000000-0000-4000-8000-00000000001A
+S120S=12000000-0000-4000-8000-00000000002A
 add_simulator "$S120A" "My.App d120-a"
 add_simulator "$S120B" "My.App d120-b" Booted
 add_simulator "$S120I" "My.App d120-ipad-a" Booted
+# 固まって shutdown できない Simulator は消せない（消し方をログに書いて残し、ほかの Simulator とコメントは片付ける）
+add_simulator "$S120S" "My.App d120-se-a" Booted
+touch "$SIM_STATE/devices/$S120S/stuck"
 add_simulator 12000000-0000-4000-8000-0000000000F1 "My.App d1200-a" Booted
 add_simulator 12000000-0000-4000-8000-0000000000F2 "MyXApp d120-a"
 add_simulator 12000000-0000-4000-8000-0000000000F3 "Other d120-a"
@@ -1095,8 +1100,11 @@ done
 grep -q "スロット用の Simulator を消しました: My.App d120-b（${S120B}）" "$LOG_120" || fail "消した Simulator をログに書いていない: $(cat "$LOG_120")"
 grep -qx "simctl shutdown $S120A" "$SIM_STATE/log" && fail "Shutdown の Simulator を shutdown した"
 grep -qx "simctl shutdown $S120B" "$SIM_STATE/log" || fail "Booted の Simulator を shutdown していない"
+has_simulator "$S120S" || fail "shutdown できない Simulator が消えた（偽の xcrun が想定と違う）"
+grep -q "スロット用の Simulator を shutdown できませんでした: My.App d120-se-a（${S120S}）: Unable to shutdown device" "$LOG_120" || fail "shutdown できなかったことをログに書いていない: $(cat "$LOG_120")"
+grep -qF "消せませんでした: My.App d120-se-a（${S120S}）。xcrun simctl shutdown ${S120S}; xcrun simctl delete ${S120S} で消してください" "$LOG_120" || fail "消せなかった Simulator の消し方（shutdown と delete）をログに書いていない: $(cat "$LOG_120")"
 [[ "$(comment_count 120)" -eq 0 ]] || fail "Simulator を消した後に、ループの状態のコメントを消していない"
-ok "Discussion が閉じたら、見張り役がそのアプリ・その番号のスロット用の Simulator だけを（Booted なら shutdown してから）消す"
+ok "Discussion が閉じたら、見張り役がそのアプリ・その番号のスロット用の Simulator だけを（Booted なら shutdown してから）消す。shutdown できないものは、消し方をログに書いて残す"
 
 # end は Simulator を消さず、消し方を表示する（resume で続けると、playbook の UDID をまた使う）
 S121A=12100000-0000-4000-8000-00000000000A
