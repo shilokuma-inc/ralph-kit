@@ -448,10 +448,11 @@ manual() {
     scripts/askhub-manual.sh "$@")
 }
 loop_log() { sed -n 's/^log=//p' "${1:-$CTL}/.claude/askhub-manual.local.txt" | tail -n 1; }
-wait_for() { # 条件が成り立つまで待つ（最大 30 秒）
+wait_for() { # 条件が成り立つまで待つ（最大 3 分。負荷の高い Mac では、見張り役の 1 周や gh の呼び出しに数十秒かかることがある。
+  # 成り立てばすぐ進むので、通るときの時間は変わらない）
   local n=0
   until "$@"; do
-    [[ $n -lt 60 ]] || return 1
+    [[ $n -lt 360 ]] || return 1
     n=$((n + 1))
     sleep 0.5
   done
