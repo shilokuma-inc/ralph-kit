@@ -475,7 +475,7 @@ hold_watch() { # Discussion $1 の見張り役を、次の「Discussion が閉�
 }
 release_watch() { # 止めた見張り役を進める。問い合わせが返るまで待つ（続けて hold_watch したときに、同じ問い合わせを止めたままと取り違えない）
   rm -f "$GH_STATE/hold-$1"
-  wait_for test ! -e "$GH_STATE/held-$1"
+  wait_for test ! -e "$GH_STATE/held-$1" || fail "止めた見張り役（Discussion $1）の問い合わせが返らない"
 }
 loop_comments() { # 状態用の Issue のコメントのうち、Discussion $1 の手動ループのもの（author が ${2:-test} のものの、目印の行）
   local d
