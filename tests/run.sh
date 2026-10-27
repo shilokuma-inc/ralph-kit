@@ -28,6 +28,12 @@ if LC_ALL=C grep -n -E '\$[A-Za-z_][A-Za-z0-9_]*[^ -~[:space:]]' "$KIT"/bin/*.sh
   fail "変数の直後に全角文字が続いています（\${VAR} のように波かっこで囲む）"
 fi
 ok "変数の直後に全角文字を続けていない"
+# mktemp の template は X で終える（BSD（macOS）の mktemp は末尾の X しか置き換えないので、X の後ろに拡張子などがあると
+# 毎回同じ名前で作り、同時に動くもう一方が作れずに落ちる。Linux の GNU の mktemp は置き換えるので、CI では流しても気づけない）
+if grep -n -E 'mktemp.*XXX+[^X"[:space:])]' "$KIT"/bin/*.sh "$KIT"/install.sh "$KIT"/shim/scripts/*.sh; then
+  fail "mktemp の template の X の後ろに文字が続いています（拡張子を付けず X で終えるか、mktemp -d で作ったディレクトリの中に置く）"
+fi
+ok "mktemp の template を X で終えている"
 
 # ---- 環境: 偽の gh・HOME・kit の取得元 ---------------------------------------------------
 mkdir -p "$WORK/bin" "$WORK/home/.claude"
