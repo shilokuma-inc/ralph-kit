@@ -346,7 +346,7 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    同じ `<アプリ名> d<N>-` で始まる Simulator を、Shutdown でなければ shutdown してから消す（playbook に書き忘れたそのループの Simulator も消す）。
    名前は正規表現を使わず字面の前方一致で比べ、`d<N>-` まで含める（`d74` で `d743` の Simulator を消さない）ので、ほかのアプリ（同じ番号のものも）・ほかのループ・
    手で作った Simulator は消さない。playbook にアプリ名の違う同じ番号の Simulator が書かれていて 1 つに決まらないときは、何も消さない。
-   消したもの・消せなかったものはループのログに `[askhub-manual …]` の行で残る。`ASKHUB_DELETE_SIMULATORS=0` を付けて `launch` / `resume`（下の `start` の片付けでは `start`）すると消さない。
+   消したもの・消せなかったもの（shutdown できなかったものも。消せなかったものには shutdown と delete の手順を添える）はループのログに `[askhub-manual …]` の行で残る。`ASKHUB_DELETE_SIMULATORS=0` を付けて `launch` / `resume`（下の `start` の片付けでは `start`）すると消さない。
    `resume` で別のループを起動したら、前の見張り役はそちらに任せて終わる（ほかに見張り役が終わるのは、`end` で終えたとき・リポジトリの checkout を消したときだけ。作業場所を消しても、Discussion が閉じるまで待ち続ける）。見張り役が動いていなかったとき（Mac の再起動など）は、
    この Mac で同じリポジトリの手動ループを次に `start` したときに、Discussion の閉じたループのコメントとスロット用の Simulator を消す。
    **Discussion を閉じずにやめる**ときは、ループを止めてから `scripts/askhub-manual.sh end <N>` でコメントを消す

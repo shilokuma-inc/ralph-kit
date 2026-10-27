@@ -11,7 +11,7 @@ kit には消す処理が無く、ある担当者の Mac では約 1 週間で 3
 
 - 見張り役は、Discussion が閉じたのを最初に見たときに、playbook（`.claude/ralph-playbook.local.md`）に UDID を書いた Simulator のうち
   名前が `<アプリ名> d<N>-…` のものからアプリ名を求め、同じ `<アプリ名> d<N>-` で始まる Simulator を `simctl shutdown`（Shutdown でなければ）→ `simctl delete` で消す。
-  消したもの・消せなかったものはループのログに書く
+  消したもの・消せなかったもの（shutdown できなかったものも）はループのログに書き、消せなかったものには shutdown と delete の手順を添える
   - アプリ名はリポジトリの名前から決まらない（ask-hub-apple は `AskHub`）ので playbook から求める。playbook に書き忘れた、そのループの Simulator も消す
   - 名前は正規表現を使わず字面の前方一致で比べ、`d<N>-` まで含める（`d74` で `d743` の Simulator を消さない）。ほかのアプリ（同じ番号のものも）・ほかのループ・手で作った Simulator は消さない
   - playbook にアプリ名の違う同じ番号の Simulator が書かれていて 1 つに決まらないとき・このループの記録が無いとき・`xcrun` が無いときは、何も消さない
