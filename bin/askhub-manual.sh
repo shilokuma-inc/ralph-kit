@@ -622,18 +622,19 @@ loop_simulators() {
 # このループのスロット用の Simulator を消す（Shutdown でなければ先に shutdown する）。$1 は 1 行ずつ結果を書く関数（watch_note・echo）。
 # ASKHUB_DELETE_SIMULATORS=0 なら消さない。消せないものがあれば失敗にする（ほかの Simulator は消し続ける）
 delete_loop_simulators() {
-  local report="$1" sims udid state name failed=false
+  local report="$1" sims udid state name error failed=false
   [[ "${ASKHUB_DELETE_SIMULATORS:-1}" != 0 ]] || return 0
   sims=$(loop_simulators) || return 1
   [[ -n "$sims" ]] || return 0
   while IFS=$'\t' read -r udid state name; do
-    if [[ "$state" != Shutdown ]]; then
-      xcrun simctl shutdown "$udid" >/dev/null 2>&1 || true
+    # shutdown できなくても delete は試す（一覧を取った後に Shutdown になっていれば消せる）。できなかったことは書いておく
+    if [[ "$state" != Shutdown ]] && ! error=$(xcrun simctl shutdown "$udid" 2>&1 >/dev/null | head -n 1); then
+      "$report" "スロット用の Simulator を shutdown できませんでした: ${name}（${udid}）: ${error}"
     fi
     if xcrun simctl delete "$udid" >/dev/null 2>&1; then
       "$report" "スロット用の Simulator を消しました: ${name}（${udid}）"
     else
-      "$report" "スロット用の Simulator を消せませんでした: ${name}（${udid}）。xcrun simctl delete ${udid} で消してください"
+      "$report" "スロット用の Simulator を消せませんでした: ${name}（${udid}）。xcrun simctl shutdown ${udid}; xcrun simctl delete ${udid} で消してください"
       failed=true
     fi
   done <<<"$sims"
