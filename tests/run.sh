@@ -36,6 +36,8 @@ cat > "$WORK/bin/gh" <<'GH'
 # テスト用の gh。GitHub の代わりに、状態用の Issue・そのコメント・閉じた Discussion を GH_STATE のファイルで持つ。
 # 応答は JSON で作り、--jq があれば jq で絞る（本物の gh と同じく、文字列はそのまま出す）。書き込み権限を持つのは test だけ。
 # Discussion はどの番号も manual-loop 付きで test が担当。GH_STATE/closed-<番号> があれば閉じている。
+# GH_STATE/hold-<番号> があるあいだは、その Discussion が閉じたかの問い合わせに答えず、止めている印に GH_STATE/held-<番号> を置く
+# （見張り役を、記録・PID のファイルを読み終えた後の確認の途中で止める）。
 # GH_STATE/needs-answer/<番号> があれば、その PR は needs-answer 付きで open。GH_STATE/pulls/<番号>.json は PR の行コメント（JSON の配列）。
 # GH_STATE/final-pr/<head の / を _ にしたもの> は、その head の PR の一覧（JSON の配列。最終 PR が既にあるとき）
 # gh のアカウントは GH_VIEWER（既定は test）。GH_LOG があれば、呼ばれた引数をそこに書き足す
@@ -88,6 +90,11 @@ case "${positional[0]:-} ${positional[1]:-}" in
   "repo view") echo '{"nameWithOwner":"example/myapp-ios"}' | out ;;
   "api user") jq -n --arg login "${GH_VIEWER:-test}" '{login: $login}' | out ;;
   "api graphql")
+    if [[ "$query" == *'{ closed }'* && -e "$S/hold-$number" ]]; then
+      touch "$S/held-$number"
+      while [[ -e "$S/hold-$number" ]]; do sleep 0.1; done
+      rm -f "$S/held-$number"
+    fi
     closed=false
     [[ -e "$S/closed-$number" ]] && closed=true
     case "$query" in
@@ -459,6 +466,14 @@ watch_exited() {
 wait_watch_exit() { # 見張り役が終わるまで待つ（$1=制御用 worktree）。最後の状態の書き出しと、次の launch が記録ファイルを取り合わないように
   wait_for watch_exited "${1:-$CTL}" || fail "見張り役が終わらない: $(cat "$(loop_log "${1:-$CTL}")")"
 }
+hold_watch() { # Discussion $1 の見張り役を、次の「Discussion が閉じたか」の確認で止める（その周の記録・PID のファイルの読み出しは終わっている）
+  touch "$GH_STATE/hold-$1"
+  wait_for test -e "$GH_STATE/held-$1"
+}
+release_watch() { # 止めた見張り役を進める。問い合わせが返るまで待つ（続けて hold_watch したときに、同じ問い合わせを止めたままと取り違えない）
+  rm -f "$GH_STATE/hold-$1"
+  wait_for test ! -e "$GH_STATE/held-$1"
+}
 loop_comments() { # 状態用の Issue のコメントのうち、Discussion $1 の手動ループのもの（author が ${2:-test} のものの、目印の行）
   local d
   for d in "$GH_STATE/comments"/*; do
@@ -662,15 +677,24 @@ LOG_106=$(loop_log "$D106")
 WATCH_106=$(sed -n 's/^watch_pid=//p' "$D106/.claude/askhub-manual.local.txt" | tail -n 1)
 wait_watch "$LOG_106"
 wait_for comment_has 106 '"state":"completed"' || fail "最終 PR を作った後に、Discussion 106 のコメントを完了にしていない"
+# 記録を消して別の PID を書くのは、見張り役を Discussion が閉じたかの確認で止めている間にする。負荷が高いと、
+# - ループ（2 秒で終わる）が launch の状態の書き出しより先に終わり、launch がコメントを先に「完了」と書くので、見張り役の final がまだ記録を書いている
+# - 見張り役は周ごとに記録と PID のファイルを別々に読むので、その間に消して書くと、自分のループの記録と別の PID を読んで引き継がれたとみなす
+# - 記録の有無を確かめてから sed で読むまでの間に消すと、sed の No such file がログに出る
+hold_watch 106 || fail "最終 PR を作った後に、見張り役が Discussion が閉じるのを待っていない: $(cat "$LOG_106")"
 rm -f "$D106/.claude/askhub-manual.local.txt"
 echo "$$" > "$D106/.claude/askhub-loop.pid"
-sleep 3
+release_watch 106
+# 次の確認まで進んでも（記録が無く、別の PID が書かれているのを読んでも）終わらない
+hold_watch 106 || fail "記録が消えて別の PID が書かれただけで、見張り役が終わった: $(cat "$LOG_106")"
 kill -0 "$WATCH_106" 2>/dev/null || fail "記録が消えて別の PID が書かれただけで、見張り役が終わった"
 # PID のファイルも消えても待ち続け、読めないことをログに書かない
 rm -f "$D106/.claude/askhub-loop.pid"
-sleep 3
+release_watch 106
+hold_watch 106 || fail "PID のファイルが消えただけで、見張り役が終わった: $(cat "$LOG_106")"
 kill -0 "$WATCH_106" 2>/dev/null || fail "PID のファイルが消えただけで、見張り役が終わった"
 touch "$GH_STATE/closed-106"
+release_watch 106
 wait_for eval '! kill -0 "$WATCH_106" 2>/dev/null' || fail "Discussion が閉じても、見張り役が終わらない"
 [[ "$(comment_count 106)" -eq 0 ]] || fail "記録が消えた後に Discussion が閉じたのに、コメントを消していない"
 [[ ! -e "$D106/.claude/askhub-manual.local.txt" ]] || fail "消えた記録を作り直した"
