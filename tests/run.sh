@@ -38,6 +38,7 @@ cat > "$WORK/bin/gh" <<'GH'
 # Discussion はどの番号も manual-loop 付きで test が担当。GH_STATE/closed-<番号> があれば閉じている。
 # GH_STATE/hold-<番号> があるあいだは、その Discussion が閉じたかの問い合わせに答えず、止めている印に GH_STATE/held-<番号> を置く
 # （見張り役を、記録・PID のファイルを読み終えた後の確認の途中で止める）。
+# コメントに書けた本文は、GH_STATE/comments/<id>/history に書き足していく（後から書き換わる状態を確かめる用）。
 # GH_STATE/needs-answer/<番号> があれば、その PR は needs-answer 付きで open。GH_STATE/pulls/<番号>.json は PR の行コメント（JSON の配列）。
 # GH_STATE/final-pr/<head の / を _ にしたもの> は、その head の PR の一覧（JSON の配列。最終 PR が既にあるとき）
 # gh のアカウントは GH_VIEWER（既定は test）。GH_LOG があれば、呼ばれた引数をそこに書き足す
@@ -116,11 +117,13 @@ case "${positional[0]:-} ${positional[1]:-}" in
         printf '%s' "${rest%%/*}" > "$S/comments/$id/issue"
         printf '%s' test > "$S/comments/$id/login"
         printf '%s' "$body" > "$S/comments/$id/body"
+        printf '%s\n' "$body" >> "$S/comments/$id/history"
         now > "$S/comments/$id/updated"
         echo "{\"id\":$id}" | out ;;
       "PATCH comments/"*)
         [[ -d "$S/comments/${rest#comments/}" ]] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
         printf '%s' "$body" > "$S/comments/${rest#comments/}/body"
+        printf '%s\n' "$body" >> "$S/comments/${rest#comments/}/history"
         now > "$S/comments/${rest#comments/}/updated" ;;
       "DELETE comments/"*)
         [[ -d "$S/comments/${rest#comments/}" ]] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
@@ -880,6 +883,11 @@ limit_loop() { # $1=Discussion の番号 $2=epic。start して playbook と goa
   perl -pi -e 's/\{\{[A-Z_]+\}\}/X/g' "$ctl/.claude/ralph-playbook.local.md"
   printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$ctl/.claude/ralph-goal.local.md"
 }
+written_bodies() { # Discussion $1 の手動ループのコメントに、これまでに書けた本文のうち、状態が $2 のもの（コメントの履歴から読む）
+  cat "$GH_STATE"/comments/*/history 2>/dev/null | awk -v d="\"discussion\":$1," -v s="\"state\":\"$2\"" '
+    /^<!-- ask-hub:loop-status / { keep = index($0, d) && index($0, s) && index($0, "\"writer\":\"manual\"") }
+    keep'
+}
 limit_launch() { # $1=Discussion の番号 $2=解除までの秒数 $3=ASKHUB_AUTO_RESUME（既定 1）。1 回目は利用上限で止まるループを起動する
   local n="$1" wait="$2" auto="${3:-1}"
   (
@@ -894,11 +902,10 @@ limit_loop 110 epic/manual-ten
 limit_launch 110 20
 LOG_110=$(loop_log "$D110")
 # 上限で待機中のコメントと記録は、解除の時刻を過ぎて再開すると書き換わる（負荷が高いと、確かめ終える前に再開する）。
-# コメントは gh に渡した本文（GH_LOG）で確かめ、記録は解除まで 600 秒の次のテストで確かめる
-wait_for grep -q '"discussion":110,.*"state":"usage-limited"' "$WORK/gh.log" || fail "利用上限で止まったのに、ループの状態を上限で待機中にしていない: $(cat "$LOG_110")"
-grep '"discussion":110,.*"state":"usage-limited"' "$WORK/gh.log" | grep -q '"usageLimitedUntil":"' \
-  || fail "上限で待機中の状態に、解除の時刻を書いていない: $(grep '"discussion":110,' "$WORK/gh.log")"
-grep -q '^| 上限の解除 | ' "$WORK/gh.log" || fail "コメントの表に、上限の解除の時刻を書いていない: $(grep -A 12 '"discussion":110,.*"state":"usage-limited"' "$WORK/gh.log")"
+# コメントは書けた本文の履歴で確かめ、記録は解除まで 600 秒の次のテストで確かめる
+wait_for eval '[[ -n "$(written_bodies 110 usage-limited)" ]]' || fail "利用上限で止まったのに、ループの状態を上限で待機中にしていない: $(cat "$LOG_110")"
+written_bodies 110 usage-limited | grep -q '"usageLimitedUntil":"' || fail "上限で待機中の状態に、解除の時刻を書いていない: $(written_bodies 110 usage-limited)"
+written_bodies 110 usage-limited | grep -q '^| 上限の解除 | ' || fail "コメントの表に、上限の解除の時刻を書いていない: $(written_bodies 110 usage-limited)"
 grep -q '利用上限で止まりました' "$LOG_110" || fail "利用上限で止まったことを、ループのログに書いていない: $(cat "$LOG_110")"
 # 解除の時刻（偽の claude が上限のメッセージに書いた時刻）を過ぎてから、再開を待つ。それまでに再開したら落とす
 # （ログの場所を読んでから時刻を比べる。逆の順だと、解除の時刻ちょうどの正しい再開を、早すぎる再開と取り違える）
