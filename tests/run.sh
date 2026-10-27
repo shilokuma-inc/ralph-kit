@@ -880,13 +880,6 @@ limit_loop() { # $1=Discussion の番号 $2=epic。start して playbook と goa
   perl -pi -e 's/\{\{[A-Z_]+\}\}/X/g' "$ctl/.claude/ralph-playbook.local.md"
   printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$ctl/.claude/ralph-goal.local.md"
 }
-comment_body() { # Discussion $1 の手動ループのコメントの本文
-  local d
-  for d in "$GH_STATE/comments"/*; do
-    [[ -f "$d/body" ]] || continue
-    if head -n 1 "$d/body" | grep -F "\"discussion\":$1," | grep -qF '"writer":"manual"'; then cat "$d/body"; fi
-  done
-}
 limit_launch() { # $1=Discussion の番号 $2=解除までの秒数 $3=ASKHUB_AUTO_RESUME（既定 1）。1 回目は利用上限で止まるループを起動する
   local n="$1" wait="$2" auto="${3:-1}"
   (
@@ -898,13 +891,19 @@ limit_launch() { # $1=Discussion の番号 $2=解除までの秒数 $3=ASKHUB_AU
 D110="$WORK/repos/myapp-ralph-d110-ctl"
 limit_loop 110 epic/manual-ten
 : > "$WORK/gh.log"
-limit_launch 110 6
+limit_launch 110 20
 LOG_110=$(loop_log "$D110")
-wait_for comment_has 110 '"state":"usage-limited"' || fail "利用上限で止まったのに、ループの状態を上限で待機中にしていない: $(loop_comments 110) $(cat "$LOG_110")"
-comment_has 110 '"usageLimitedUntil":"' || fail "上限で待機中の状態に、解除の時刻を書いていない: $(loop_comments 110)"
-comment_body 110 | grep -q '^| 上限の解除 | ' || fail "コメントの表に、上限の解除の時刻を書いていない: $(comment_body 110)"
+# 上限で待機中のコメントと記録は、解除の時刻を過ぎて再開すると書き換わる（負荷が高いと、確かめ終える前に再開する）。
+# コメントは gh に渡した本文（GH_LOG）で確かめ、記録は解除まで 600 秒の次のテストで確かめる
+wait_for grep -q '"discussion":110,.*"state":"usage-limited"' "$WORK/gh.log" || fail "利用上限で止まったのに、ループの状態を上限で待機中にしていない: $(cat "$LOG_110")"
+grep '"discussion":110,.*"state":"usage-limited"' "$WORK/gh.log" | grep -q '"usageLimitedUntil":"' \
+  || fail "上限で待機中の状態に、解除の時刻を書いていない: $(grep '"discussion":110,' "$WORK/gh.log")"
+grep -q '^| 上限の解除 | ' "$WORK/gh.log" || fail "コメントの表に、上限の解除の時刻を書いていない: $(grep -A 12 '"discussion":110,.*"state":"usage-limited"' "$WORK/gh.log")"
 grep -q '利用上限で止まりました' "$LOG_110" || fail "利用上限で止まったことを、ループのログに書いていない: $(cat "$LOG_110")"
-grep -q '^usage_limited_until=' "$D110/.claude/askhub-manual.local.txt" || fail "解除の時刻を記録していない"
+# 解除の時刻（偽の claude が上限のメッセージに書いた時刻）を過ぎてから、再開を待つ
+RESET_110=$(sed -n 's/^Claude AI usage limit reached|//p' "$LOG_110")
+[[ "$RESET_110" =~ ^[0-9]+$ ]] || fail "ループのログに、上限のメッセージが無い: $(cat "$LOG_110")"
+while (( $(date +%s) < RESET_110 )); do sleep 1; done
 wait_for eval '[[ "$(loop_log "$D110")" != "$LOG_110" ]]' || fail "解除の時刻を過ぎても、ループを再開していない: $(cat "$LOG_110")"
 grep -q '解除の時刻を過ぎたので、ループを再開します' "$LOG_110" || fail "再開したことを、止まったループのログに書いていない"
 wait_watch "$(loop_log "$D110")"
@@ -923,6 +922,8 @@ limit_loop 111 epic/manual-eleven
 limit_launch 111 600
 LOG_111=$(loop_log "$D111")
 wait_for comment_has 111 '"state":"usage-limited"' || fail "利用上限で止まったのに、上限で待機中にしていない: $(cat "$LOG_111")"
+# 解除を待っている間は、解除の時刻を記録している（解除まで 600 秒なので、確かめる前に再開しない）
+grep -q '^usage_limited_until=' "$D111/.claude/askhub-manual.local.txt" || fail "解除の時刻を記録していない"
 STUB_LOOP=promise manual resume 111 >/dev/null || fail "解除を待っている間の resume が失敗した"
 grep -q '^usage_limited_until=' "$D111/.claude/askhub-manual.local.txt" && fail "resume で起動し直したのに、解除の時刻の記録が残っている"
 wait_for grep -q '別のループが起動しているため、自動では再開しません' "$LOG_111" || fail "resume したのに、待っていた見張り役が終わらない: $(cat "$LOG_111")"
