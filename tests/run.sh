@@ -901,12 +901,9 @@ limit_loop 110 epic/manual-ten
 : > "$WORK/gh.log"
 limit_launch 110 20
 LOG_110=$(loop_log "$D110")
-# 上限で待機中のコメントと記録は、解除の時刻を過ぎて再開すると書き換わる（負荷が高いと、確かめ終える前に再開する）。
-# コメントは書けた本文の履歴で確かめ、記録は解除まで 600 秒の次のテストで確かめる
-wait_for eval '[[ -n "$(written_bodies 110 usage-limited)" ]]' || fail "利用上限で止まったのに、ループの状態を上限で待機中にしていない: $(cat "$LOG_110")"
-written_bodies 110 usage-limited | grep -q '"usageLimitedUntil":"' || fail "上限で待機中の状態に、解除の時刻を書いていない: $(written_bodies 110 usage-limited)"
-written_bodies 110 usage-limited | grep -q '^| 上限の解除 | ' || fail "コメントの表に、上限の解除の時刻を書いていない: $(written_bodies 110 usage-limited)"
-grep -q '利用上限で止まりました' "$LOG_110" || fail "利用上限で止まったことを、ループのログに書いていない: $(cat "$LOG_110")"
+# 上限で待機中の状態（解除の時刻つき）と記録は、解除まで 600 秒の次のテストで確かめる。ここは解除が近いので、負荷が高いと
+# 見張り役が状態を求める前に解除の時刻を過ぎ（待機中ではなく異常終了と書く）、確かめ終える前に再開して書き換わる
+wait_for grep -q '利用上限で止まりました' "$LOG_110" || fail "利用上限で止まったことを、ループのログに書いていない: $(cat "$LOG_110")"
 # 解除の時刻（偽の claude が上限のメッセージに書いた時刻）を過ぎてから、再開を待つ。それまでに再開したら落とす
 # （ログの場所を読んでから時刻を比べる。逆の順だと、解除の時刻ちょうどの正しい再開を、早すぎる再開と取り違える）
 RESET_110=$(sed -n 's/^Claude AI usage limit reached|//p' "$LOG_110")
@@ -926,8 +923,9 @@ wait_for comment_has 110 '"state":"completed"' || fail "再開したループが
 comment_has 110 'usageLimitedUntil' && fail "完了したのに、解除の時刻が残っている"
 touch "$GH_STATE/closed-110"
 wait_watch_exit "$D110"
-ok "ループが Claude の利用上限で止まったら、見張り役が上限で待機中と書き、解除の時刻の後に再開する"
+ok "ループが Claude の利用上限で止まったら、見張り役は解除の時刻を過ぎてから再開する（それより前には再開しない）"
 
+# 見張り役は解除を待っている間、ループの状態を上限で待機中（解除の時刻つき）で書き、解除の時刻を記録する。
 # 解除を待っている間に担当者が resume したら、待っていた見張り役は何もせずに終わり、新しいループの見張り役に任せる
 D111="$WORK/repos/myapp-ralph-d111-ctl"
 limit_loop 111 epic/manual-eleven
@@ -935,7 +933,9 @@ limit_loop 111 epic/manual-eleven
 limit_launch 111 600
 LOG_111=$(loop_log "$D111")
 wait_for comment_has 111 '"state":"usage-limited"' || fail "利用上限で止まったのに、上限で待機中にしていない: $(cat "$LOG_111")"
-# 解除を待っている間は、解除の時刻を記録している（解除まで 600 秒なので、確かめる前に再開しない）
+# 解除まで 600 秒あるので、確かめ終える前に解除の時刻を過ぎることはない。コメントの内容は、書けた本文の履歴で確かめる
+written_bodies 111 usage-limited | grep -q '"usageLimitedUntil":"' || fail "上限で待機中の状態に、解除の時刻を書いていない: $(written_bodies 111 usage-limited)"
+written_bodies 111 usage-limited | grep -q '^| 上限の解除 | ' || fail "コメントの表に、上限の解除の時刻を書いていない: $(written_bodies 111 usage-limited)"
 grep -q '^usage_limited_until=' "$D111/.claude/askhub-manual.local.txt" || fail "解除の時刻を記録していない"
 STUB_LOOP=promise manual resume 111 >/dev/null || fail "解除を待っている間の resume が失敗した"
 grep -q '^usage_limited_until=' "$D111/.claude/askhub-manual.local.txt" && fail "resume で起動し直したのに、解除の時刻の記録が残っている"
@@ -944,7 +944,7 @@ wait_watch "$(loop_log "$D111")"
 grep -q -- '^pr create .*--head epic/manual-eleven' "$WORK/gh.log" || fail "resume したループの見張り役が、最終 PR を作っていない"
 touch "$GH_STATE/closed-111"
 wait_watch_exit "$D111"
-ok "解除を待っている間に resume したら、待っていた見張り役は自動では再開しない"
+ok "利用上限で止まったら、見張り役は上限で待機中（解除の時刻つき）と書いて記録し、解除を待っている間に resume したら自動では再開しない"
 
 # 解除を待っている間に ralph-stop.sh で止めたら、自動では再開しない（ループの状態は開始待ちに戻す）
 D112="$WORK/repos/myapp-ralph-d112-ctl"
