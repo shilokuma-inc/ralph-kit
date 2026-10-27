@@ -201,10 +201,38 @@ else
   exit 1
 fi
 CLAUDE
-chmod +x "$WORK/bin/gh" "$WORK/bin/claude"
+# テスト用の xcrun。simctl の list devices --json・shutdown・delete だけを、SIM_STATE/devices/<UDID>/{name,state} の Simulator で行う
+# （担当者の Mac で流しても、本物の Simulator には触らない）。本物と同じく、Shutdown の Simulator は shutdown できず、Shutdown でない Simulator は delete できない。
+# SIM_STATE/devices/<UDID>/stuck があれば、その Simulator は shutdown できない（固まった Simulator）。呼ばれた引数を SIM_STATE/log に書き足す
+cat > "$WORK/bin/xcrun" <<'XCRUN'
+#!/bin/bash
+S="${SIM_STATE:?}"
+mkdir -p "$S/devices"
+printf '%s\n' "$*" >> "$S/log"
+[[ "${1:-}" == simctl ]] || exit 1
+case "${2:-}" in
+  list)
+    for d in "$S/devices"/*; do
+      [[ -f "$d/name" ]] || continue
+      jq -n --arg udid "${d##*/}" --arg name "$(cat "$d/name")" --arg state "$(cat "$d/state")" '{udid: $udid, name: $name, state: $state, isAvailable: true}'
+    done | jq -s '{devices: {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": .}}' ;;
+  shutdown)
+    [[ -d "$S/devices/${3:-}" ]] || { echo "Invalid device: ${3:-}" >&2; exit 164; }
+    [[ "$(cat "$S/devices/$3/state")" != Shutdown ]] || { echo "Unable to shutdown device in current state: Shutdown" >&2; exit 149; }
+    [[ ! -e "$S/devices/$3/stuck" ]] || { echo "Unable to shutdown device: Operation timed out" >&2; exit 60; }
+    printf '%s' Shutdown > "$S/devices/$3/state" ;;
+  delete)
+    [[ -d "$S/devices/${3:-}" ]] || { echo "Invalid device: ${3:-}" >&2; exit 164; }
+    [[ "$(cat "$S/devices/$3/state")" == Shutdown ]] || { echo "Unable to delete a device in the current state: Booted" >&2; exit 149; }
+    rm -r "${S:?}/devices/$3" ;;
+  *) exit 1 ;;
+esac
+XCRUN
+chmod +x "$WORK/bin/gh" "$WORK/bin/claude" "$WORK/bin/xcrun"
 export PATH="$WORK/bin:$PATH"
 export HOME="$WORK/home"
 export GH_STATE="$WORK/github"
+export SIM_STATE="$WORK/simulators"
 echo '{"enabledPlugins":{"ralph-loop@claude-plugins-official":true}}' > "$HOME/.claude/settings.json"
 git config --global user.name test
 git config --global user.email test@example.com
@@ -1015,6 +1043,106 @@ touch "$GH_STATE/closed-115"
 wait_watch_exit "$D115"
 rm -f "$GH_STATE/needs-answer/8"
 ok "ASKHUB_AUTO_RESUME=0 なら、回答待ちの PR に回答が付いても再開しない"
+
+# ---- スロット用の Simulator ---------------------------------------------------------------------
+# 準備の Claude は、スロットごとに専用の Simulator（<アプリ名> d<N>-…）を作り、UDID を playbook に書く。
+# ゴール元の Discussion が閉じたら、見張り役（と次の start の片付け）が、そのアプリ・その番号の Simulator だけを消す
+add_simulator() { # $1=UDID $2=名前 $3=状態（既定 Shutdown）
+  mkdir -p "$SIM_STATE/devices/$1"
+  printf '%s' "$2" > "$SIM_STATE/devices/$1/name"
+  printf '%s' "${3:-Shutdown}" > "$SIM_STATE/devices/$1/state"
+}
+has_simulator() { [[ -d "$SIM_STATE/devices/$1" ]]; }
+add_slot_table() { # $1=Discussion の番号。playbook の「このアプリ固有の前提」に、残りの引数（「UDID 名前」）の表を書き足す
+  local playbook="$WORK/repos/myapp-ralph-d$1-ctl/.claude/ralph-playbook.local.md" row
+  shift
+  { echo '- 検証はスロットごとに専用の Simulator を使う:'; for row in "$@"; do echo "  | \`${row%% *}\`（${row#* }） |"; done; } >> "$playbook"
+}
+
+# 見張り役は、Discussion が閉じたら、playbook に UDID を書いた Simulator の名前からアプリ名（正規表現の記号を含む My.App）を求め、
+# 「My.App d120-」で始まる Simulator を消す（Booted なら shutdown してから。playbook に書き忘れた Simulator も）。
+# 番号が前方一致するだけのもの・正規表現なら当たる名前・ほかのアプリの同じ番号・ほかのループ・手で作った Simulator は消さない
+S120A=12000000-0000-4000-8000-00000000000A
+S120B=12000000-0000-4000-8000-00000000000B
+S120I=12000000-0000-4000-8000-00000000001A
+S120S=12000000-0000-4000-8000-00000000002A
+add_simulator "$S120A" "My.App d120-a"
+add_simulator "$S120B" "My.App d120-b" Booted
+add_simulator "$S120I" "My.App d120-ipad-a" Booted
+# 固まって shutdown できない Simulator は消せない（消し方をログに書いて残し、ほかの Simulator とコメントは片付ける）
+add_simulator "$S120S" "My.App d120-se-a" Booted
+touch "$SIM_STATE/devices/$S120S/stuck"
+add_simulator 12000000-0000-4000-8000-0000000000F1 "My.App d1200-a" Booted
+add_simulator 12000000-0000-4000-8000-0000000000F2 "MyXApp d120-a"
+add_simulator 12000000-0000-4000-8000-0000000000F3 "Other d120-a"
+add_simulator 12000000-0000-4000-8000-0000000000F4 "Copy of My.App d120-a"
+add_simulator 12000000-0000-4000-8000-0000000000F5 "My.App d121-a"
+add_simulator 12000000-0000-4000-8000-0000000000F6 "My.App d120"
+add_simulator 12000000-0000-4000-8000-0000000000F7 "iPhone 17 Pro" Booted
+D120="$WORK/repos/myapp-ralph-d120-ctl"
+limit_loop 120 epic/simulators-twenty
+# UDID は小文字で書いても同じ Simulator とみなす。ほかのループの Simulator の UDID に触れていても、そのアプリ名にはしない
+add_slot_table 120 "$S120A My.App d120-a" "$(tr '[:upper:]' '[:lower:]' <<<"$S120B") My.App d120-b" \
+  "12000000-0000-4000-8000-0000000000F1 My.App d1200-a（ほかのループ。触らない）"
+: > "$SIM_STATE/log"
+STUB_LOOP=promise manual launch 120 "SMOKE DONE" >/dev/null || fail "Discussion 120 の launch が失敗した"
+wait_watch "$(loop_log "$D120")"
+has_simulator "$S120A" && has_simulator "$S120B" || fail "Discussion が閉じる前に、スロット用の Simulator を消した"
+touch "$GH_STATE/closed-120"
+wait_watch_exit "$D120"
+LOG_120=$(loop_log "$D120")
+for udid in "$S120A" "$S120B" "$S120I"; do
+  has_simulator "$udid" && fail "Discussion が閉じたのに、スロット用の Simulator（$(cat "$SIM_STATE/devices/$udid/name")）を消していない: $(cat "$LOG_120")"
+done
+for n in 1 2 3 4 5 6 7; do
+  has_simulator "12000000-0000-4000-8000-0000000000F$n" || fail "このループのものではない Simulator を消した（F${n}）"
+done
+grep -q "スロット用の Simulator を消しました: My.App d120-b（${S120B}）" "$LOG_120" || fail "消した Simulator をログに書いていない: $(cat "$LOG_120")"
+grep -qx "simctl shutdown $S120A" "$SIM_STATE/log" && fail "Shutdown の Simulator を shutdown した"
+grep -qx "simctl shutdown $S120B" "$SIM_STATE/log" || fail "Booted の Simulator を shutdown していない"
+has_simulator "$S120S" || fail "shutdown できない Simulator が消えた（偽の xcrun が想定と違う）"
+grep -q "スロット用の Simulator を shutdown できませんでした: My.App d120-se-a（${S120S}）: Unable to shutdown device" "$LOG_120" || fail "shutdown できなかったことをログに書いていない: $(cat "$LOG_120")"
+grep -qF "消せませんでした: My.App d120-se-a（${S120S}）。xcrun simctl shutdown ${S120S}; xcrun simctl delete ${S120S} で消してください" "$LOG_120" || fail "消せなかった Simulator の消し方（shutdown と delete）をログに書いていない: $(cat "$LOG_120")"
+[[ "$(comment_count 120)" -eq 0 ]] || fail "Simulator を消した後に、ループの状態のコメントを消していない"
+ok "Discussion が閉じたら、見張り役がそのアプリ・その番号のスロット用の Simulator だけを（Booted なら shutdown してから）消す。shutdown できないものは、消し方をログに書いて残す"
+
+# end は Simulator を消さず、消し方を表示する（resume で続けると、playbook の UDID をまた使う）
+S121A=12100000-0000-4000-8000-00000000000A
+add_simulator "$S121A" "Tool d121-a" Booted
+limit_loop 121 epic/simulators-twenty-one
+add_slot_table 121 "$S121A Tool d121-a"
+OUT=$(manual end 121) || fail "Discussion 121 の end が失敗した"
+has_simulator "$S121A" || fail "end がスロット用の Simulator を消した"
+grep -qF "xcrun simctl shutdown $S121A; xcrun simctl delete $S121A   # Tool d121-a" <<<"$OUT" || fail "end がスロット用の Simulator の消し方を表示していない: $OUT"
+grep -q 'My.App d121-a' <<<"$OUT" && fail "end が、ほかのアプリの Simulator の消し方を表示した"
+ok "end は、スロット用の Simulator を消さずに消し方を表示する"
+
+# 見張り役が動いていなかったループは、次の start の片付けが消す。アプリ名が 1 つに決まらないときと、ASKHUB_DELETE_SIMULATORS=0 のときは消さない
+S122A=12200000-0000-4000-8000-00000000000A
+S123A=12300000-0000-4000-8000-00000000000A
+S123O=12300000-0000-4000-8000-00000000000F
+S124A=12400000-0000-4000-8000-00000000000A
+add_simulator "$S122A" "Tool d122-a"
+add_simulator "$S123A" "Tool d123-a"
+add_simulator "$S123O" "Other d123-a"
+add_simulator "$S124A" "Tool d124-a"
+limit_loop 122 epic/simulators-twenty-two
+add_slot_table 122 "$S122A Tool d122-a"
+limit_loop 123 epic/simulators-twenty-three
+add_slot_table 123 "$S123A Tool d123-a" "$S123O Other d123-a"
+touch "$GH_STATE/closed-122" "$GH_STATE/closed-123"
+OUT=$(manual start 124 epic/simulators-twenty-four 2>&1) || fail "Discussion 124 の手動ループを start できない: $OUT"
+has_simulator "$S122A" && fail "start の片付けが、Discussion の閉じたループのスロット用の Simulator を消していない: $OUT"
+grep -q "スロット用の Simulator を消しました: Tool d122-a" <<<"$OUT" || fail "start の片付けが、消した Simulator を表示していない: $OUT"
+has_simulator "$S123A" && has_simulator "$S123O" || fail "アプリ名が 1 つに決まらないのに、Simulator を消した"
+grep -q 'スロット用の Simulator を決められません' <<<"$OUT" || fail "アプリ名が 1 つに決まらないことを知らせていない: $OUT"
+[[ "$(comment_count 122)" -eq 0 && "$(comment_count 123)" -eq 0 ]] || fail "start の片付けが、Discussion の閉じたループのコメントを消していない"
+add_slot_table 124 "$S124A Tool d124-a"
+touch "$GH_STATE/closed-124"
+OUT=$(ASKHUB_DELETE_SIMULATORS=0 manual start 125 epic/simulators-twenty-five 2>&1) || fail "Discussion 125 の手動ループを start できない: $OUT"
+has_simulator "$S124A" || fail "ASKHUB_DELETE_SIMULATORS=0 なのに、スロット用の Simulator を消した"
+[[ "$(comment_count 124)" -eq 0 ]] || fail "ASKHUB_DELETE_SIMULATORS=0 のとき、ループの状態のコメントまで残した"
+ok "見張り役が動いていなかったループのスロット用の Simulator は次の start が消し、アプリ名が 1 つに決まらないとき・ASKHUB_DELETE_SIMULATORS=0 のときは消さない"
 
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e
