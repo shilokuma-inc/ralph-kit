@@ -1251,6 +1251,80 @@ has_simulator "$S124A" || fail "ASKHUB_DELETE_SIMULATORS=0 なのに、スロッ
 [[ "$(comment_count 124)" -eq 0 ]] || fail "ASKHUB_DELETE_SIMULATORS=0 のとき、ループの状態のコメントまで残した"
 ok "見張り役が動いていなかったループのスロット用の Simulator は次の start が消し、アプリ名が 1 つに決まらないとき・ASKHUB_DELETE_SIMULATORS=0 のときは消さない"
 
+# ---- スロットの DerivedData など（ralph-dd）-------------------------------------------------------
+# スロットは ~/Library/Caches/ralph-dd/<名前>-d<N>-<スロット> でビルドし、.xcresult・スクリーンショットなども同じ接頭辞で置く。
+# ゴール元の Discussion が閉じたら、見張り役（と次の start の片付け）が、そのループの「<名前>-d<N>-」「<名前>-d<N>.」で始まるものだけを消す
+DD="$HOME/Library/Caches/ralph-dd"
+mkdir -p "$DD"
+add_dd() { # ralph-dd の下に作る（名前が / で終わればディレクトリ、そうでなければファイル）
+  local name
+  for name in "$@"; do
+    if [[ "$name" == */ ]]; then mkdir -p "$DD/$name/Build/Products" && echo build > "$DD/$name/Build/Products/app"; else echo log > "$DD/$name"; fi
+  done
+}
+has_dd() { [[ -e "$DD/$1" || -L "$DD/$1" ]]; }
+
+# 見張り役は、Discussion が閉じたら、start が案内する名前（myapp）と playbook に書いた名前（kit 1.10 までの準備の Claude が決めた my.app）の
+# 「-d130-」「-d130.」で始まるものを消す。番号が前方一致するだけのもの・正規表現なら当たる名前・ほかのアプリの同じ番号・ほかのループ・
+# 接頭辞の無いもの・ralph-dd の外は消さない（シンボリックリンクは、リンクだけを消してリンク先は残す）
+OURS_130=(myapp-d130-a/ myapp-d130-b/ myapp-d130-a.uitest.xcresult/ myapp-d130-shots-before/ myapp-d130.log my.app-d130-a/ my.app-d130-b-before/)
+KEEP_130=(myapp-d1300-a/ myapp-d13-a/ myapp-d131-a/ myapp-d130 myapp-d130x/ myapp-d130_a/ my-app-d130-a/ myappx-d130-a/ other-d130-a/ copy-myapp-d130-a/ d130-a/ d130a-shots.xcresult/ task16-before.xcresult/)
+add_dd "${OURS_130[@]}" "${KEEP_130[@]}"
+mkdir -p "$WORK/outside-dd" && echo keep > "$WORK/outside-dd/file"
+ln -s "$WORK/outside-dd" "$DD/myapp-d130-link"
+D130="$WORK/repos/myapp-ralph-d130-ctl"
+limit_loop 130 epic/derived-data-thirty
+# ほかのループ・ほかのアプリの ralph-dd に触れていても、その名前にはしない
+cat >> "$D130/.claude/ralph-playbook.local.md" <<'PB'
+- DerivedData はスロットごとに `$HOME/Library/Caches/ralph-dd/my.app-d130-$SLOT`（スクリーンショットは `$HOME/Library/Caches/ralph-dd/my.app-d130-shots/`）
+- 前の epic の `$HOME/Library/Caches/ralph-dd/other-d1300-a`・`~/Library/Caches/ralph-dd/copy-myapp-d131-a`・`ralph-dd/d130-a` は使わない
+PB
+STUB_LOOP=promise manual launch 130 "SMOKE DONE" >/dev/null || fail "Discussion 130 の launch が失敗した"
+wait_watch "$(loop_log "$D130")"
+for name in "${OURS_130[@]}"; do
+  has_dd "${name%/}" || fail "Discussion が閉じる前に、ralph-dd の ${name%/} を消した"
+done
+touch "$GH_STATE/closed-130"
+wait_watch_exit "$D130"
+LOG_130=$(loop_log "$D130")
+for name in "${OURS_130[@]}" myapp-d130-link; do
+  has_dd "${name%/}" && fail "Discussion が閉じたのに、ralph-dd の ${name%/} を消していない: $(cat "$LOG_130")"
+done
+for name in "${KEEP_130[@]}"; do
+  has_dd "${name%/}" || fail "このループのものではない ralph-dd の ${name%/} を消した"
+done
+[[ -f "$WORK/outside-dd/file" ]] || fail "ralph-dd のシンボリックリンクのリンク先（ralph-dd の外）を消した"
+grep -qF "スロットの DerivedData などを消しました: $DD/myapp-d130-a" "$LOG_130" || fail "消した DerivedData などをログに書いていない: $(cat "$LOG_130")"
+grep -qF "スロットの DerivedData などを消しました: $DD/my.app-d130-b-before" "$LOG_130" || fail "playbook に書いた名前の DerivedData などを消したことをログに書いていない: $(cat "$LOG_130")"
+[[ "$(comment_count 130)" -eq 0 ]] || fail "DerivedData などを消した後に、ループの状態のコメントを消していない"
+ok "Discussion が閉じたら、見張り役がそのループの ralph-dd（<名前>-d<N>- か <名前>-d<N>. で始まるもの）だけを消す"
+
+# end は消さず、消し方を表示する（resume で続けると、またビルドに使う）
+add_dd myapp-d131-b/
+limit_loop 131 epic/derived-data-thirty-one
+OUT=$(manual end 131) || fail "Discussion 131 の end が失敗した"
+has_dd myapp-d131-a && has_dd myapp-d131-b || fail "end が ralph-dd の DerivedData などを消した"
+grep -qF "rm -rf $DD/myapp-d131-b" <<<"$OUT" || fail "end が DerivedData などの消し方を表示していない: $OUT"
+grep -q 'myapp-d130' <<<"$OUT" && fail "end が、ほかのループの DerivedData などの消し方を表示した: $OUT"
+ok "end は、ralph-dd の DerivedData などを消さずに消し方を表示する"
+
+# 見張り役が動いていなかったループは、次の start の片付けが（start を待たせないよう裏で）消す。ASKHUB_DELETE_DERIVED_DATA=0 のときは消さない
+add_dd myapp-d132-a/ myapp-d132-a.uitest.xcresult/ myapp-d133-a/
+limit_loop 132 epic/derived-data-thirty-two
+limit_loop 133 epic/derived-data-thirty-three
+touch "$GH_STATE/closed-132"
+OUT=$(manual start 134 epic/derived-data-thirty-four 2>&1) || fail "Discussion 134 の手動ループを start できない: $OUT"
+grep -q 'Discussion #132 の手動ループのスロットの DerivedData など.*を裏で消しています' <<<"$OUT" || fail "start の片付けが、DerivedData などを消していることを表示していない: $OUT"
+wait_for eval '! has_dd myapp-d132-a && ! has_dd myapp-d132-a.uitest.xcresult' || fail "start の片付けが、Discussion の閉じたループの DerivedData などを消していない: $OUT"
+has_dd myapp-d133-a || fail "start の片付けが、Discussion が open のループの DerivedData などを消した"
+[[ "$(comment_count 132)" -eq 0 ]] || fail "start の片付けが、Discussion の閉じたループのコメントを消していない"
+touch "$GH_STATE/closed-133"
+OUT=$(ASKHUB_DELETE_DERIVED_DATA=0 manual start 135 epic/derived-data-thirty-five 2>&1) || fail "Discussion 135 の手動ループを start できない: $OUT"
+grep -q '裏で消しています' <<<"$OUT" && fail "ASKHUB_DELETE_DERIVED_DATA=0 なのに、DerivedData などを消そうとした: $OUT"
+has_dd myapp-d133-a || fail "ASKHUB_DELETE_DERIVED_DATA=0 なのに、DerivedData などを消した"
+[[ "$(comment_count 133)" -eq 0 ]] || fail "ASKHUB_DELETE_DERIVED_DATA=0 のとき、ループの状態のコメントまで残した"
+ok "見張り役が動いていなかったループの ralph-dd は次の start が裏で消し、ASKHUB_DELETE_DERIVED_DATA=0 のときは消さない"
+
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e
 (cd "$APP" && scripts/askhub-manual.sh >/dev/null 2>&1)
