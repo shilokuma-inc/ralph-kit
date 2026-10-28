@@ -686,8 +686,9 @@ loop_derived_data() {
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
     for entry in "$DERIVED_DATA_DIR/$name-d$LOOP_DISCUSSION"-* "$DERIVED_DATA_DIR/$name-d$LOOP_DISCUSSION".*; do
-      # 当たるものが無いときは、glob が展開されないまま残るので飛ばす（リンク先の無いシンボリックリンクは拾う）
-      if [[ -e "$entry" || -L "$entry" ]]; then printf '%s\n' "$entry"; fi
+      # 当たるものが無いときは、glob が展開されないまま残るので飛ばす（リンク先の無いシンボリックリンクは拾う）。
+      # 改行を含む名前は、1 行に 1 つの出力では別のパス（相対パス）に分かれるので扱わない
+      if [[ ( -e "$entry" || -L "$entry" ) && "$entry" != *$'\n'* ]]; then printf '%s\n' "$entry"; fi
     done
   done < <(loop_derived_data_names | sort -u) | sort -u
 }
@@ -700,6 +701,8 @@ delete_loop_derived_data() {
   entries=$(loop_derived_data)
   [[ -n "$entries" ]] || return 0
   while IFS= read -r entry; do
+    # ralph-dd の直下のもの（絶対パス）でなければ消さない（相対パスは、見張り役の作業ディレクトリ（メインの checkout）のものになる）
+    [[ "$entry" == "$DERIVED_DATA_DIR/"?* && "${entry#"$DERIVED_DATA_DIR/"}" != */* ]] || continue
     if rm -rf -- "$entry" 2>/dev/null && [[ ! -e "$entry" && ! -L "$entry" ]]; then
       "$report" "スロットの DerivedData などを消しました: $entry"
     else
