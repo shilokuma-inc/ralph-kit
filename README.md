@@ -350,14 +350,16 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    消したもの・消せなかったもの（shutdown できなかったものも。消せなかったものには shutdown と delete の手順を添える）はループのログに `[askhub-manual …]` の行で残る。`ASKHUB_DELETE_SIMULATORS=0` を付けて `launch` / `resume`（下の `start` の片付けでは `start`）すると消さない。
    同じときに、**このループのスロットの DerivedData など**（`~/Library/Caches/ralph-dd` の下。1 スロット 0.3〜7 GB）も消す。
    消すのは ralph-dd の直下の、名前が `<名前>-d<N>-` か `<名前>-d<N>.` で始まるものだけ（`d74` で `d743` のものを消さない）。
-   `<名前>` は `start` が案内する名前（上の「作業場所」の `<名前>`）と、playbook に書いた `ralph-dd/<名前>-d<N>-…` の `<名前>`
-   （kit 1.10 までは準備の Claude が名前を決めていた。例: dokogacha-app-ios の `dokogacha`）。名前は正規表現を使わず字面で比べるので、
+   `<名前>` は `start` が案内する名前（上の「作業場所」の `<名前>`）と、playbook に書いた `ralph-dd/<名前>-d<N>-…` の `<名前>` のうち `start` が案内する名前の
+   `-` より前の部分のもの（kit 1.10 までは準備の Claude が名前を決めていた。例: dokogacha-app-ios の `dokogacha`）。playbook がほかのアプリの ralph-dd に
+   触れていても、その名前にはしない。改行を含む名前は扱わない。名前は正規表現を使わず字面で比べるので、
    ほかのループ・ほかのアプリ（同じ番号のものも）・接頭辞の無いもの（`d<N>-…`・`task16-…` など。手で作ったものと見分けられない）は消さない。
    シンボリックリンクはリンクだけを消す。消したもの・消せなかったものはループのログに `[askhub-manual …]` の行で残る。
    `ASKHUB_DELETE_DERIVED_DATA=0` を付けて `launch` / `resume`（`start` の片付けでは `start`）すると消さない。
    `resume` で別のループを起動したら、前の見張り役はそちらに任せて終わる（ほかに見張り役が終わるのは、`end` で終えたとき・リポジトリの checkout を消したときだけ。作業場所を消しても、Discussion が閉じるまで待ち続ける）。見張り役が動いていなかったとき（Mac の再起動など）は、
    この Mac で同じリポジトリの手動ループを次に `start` したときに、Discussion の閉じたループのコメントとスロット用の Simulator・DerivedData などを消す
-   （DerivedData などは消し終えるまで数分かかることがあるので、`start` を待たせないよう裏で消し、結果をそのループのログに書く）。
+   （DerivedData などは消し終えるまで数分かかることがあるので、`start` を待たせないよう裏で消し、消し終えてからコメントを消してループを終える。
+   途中で止まったら、終えた記録が無いので次の `start` がやり直す。結果はそのループのログに書く）。
    **Discussion を閉じずにやめる**ときは、ループを止めてから `scripts/askhub-manual.sh end <N>` でコメントを消す
    （作業場所とスロット用の Simulator・DerivedData などは消さない（`resume` で続けると使う）。消し方を表示する）。
    終えたループは、`status` を流しても状態を書き直さず、見張り役も最終 PR を作らない（続けるなら `resume <N>`）。
