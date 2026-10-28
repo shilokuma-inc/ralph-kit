@@ -1161,7 +1161,9 @@ case "$COMMAND" in
      - INTEGRATION_BRANCH: $EPIC / BASE_BRANCH: $BASE_BRANCH
      - WORKTREE_CTL: $CTL
      - WORKTREE_A: ${CTL%-ctl}-a / WORKTREE_B: ${CTL%-ctl}-b
-     - VERIFY_COMMANDS: スロットごとの場所（-derivedDataPath など）は、スロットのパスから作る（同じリポジトリのほかのループと共有しない）
+     - VERIFY_COMMANDS: スロットごとの場所は、同じリポジトリのほかのループと共有しない。-derivedDataPath は「$DERIVED_DATA_DIR/${STEM}-d${DISCUSSION}-<スロット>」
+       （例: ${STEM}-d${DISCUSSION}-a）にし、.xcresult・スクリーンショット・ログなど ralph-dd の下に置くものも、すべて「${STEM}-d${DISCUSSION}-」で始める。
+       Discussion が閉じたら、見張り役が ralph-dd の「${STEM}-d${DISCUSSION}-」か「${STEM}-d${DISCUSSION}.」で始まるものを消す（それ以外の名前のものは残る）
      - スロット専用の Simulator を作るときは、名前を「<アプリ名> d${DISCUSSION}-<スロットなど>」（例: <アプリ名> d${DISCUSSION}-a・<アプリ名> d${DISCUSSION}-b-ipad。
        <アプリ名> は、ほかのアプリと重ならないこのアプリの名前（ask-hub-apple なら AskHub））にし、UDID を playbook の「このアプリ固有の前提」に書く。
        Discussion が閉じたら、見張り役が同じ「<アプリ名> d${DISCUSSION}-」で始まる Simulator を消す
