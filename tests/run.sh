@@ -723,7 +723,8 @@ cat > "$WORK/bin/opencode" <<'OPENCODE'
 # STUB_OPENCODE_STRAY=1 のときは、途中のメッセージに promise を出したまま、state を消して止まる
 # （完了語を出さずに終わったのに、見張り役が最終 PR を作らないことの確認用）
 # STUB_OPENCODE_BARRIER=<ディレクトリ> のときは、そこに自分のリポジトリの名前のファイルを置き、ファイルが 2 つに
-# なる（もう一方のループの opencode も起動する）まで最大 60 秒待ってから promise を出す（ループを同時に動かす確認用）
+# なる（もう一方のループの opencode も起動する）まで最大 3 分待ってから promise を出す（ループを同時に動かす確認用。
+# 負荷の高い Mac では、もう一方のループの起動に数十秒かかることがある。そろえばすぐ進むので、通るときの時間は変わらない）
 mode=title model=no
 for a in "$@"; do
   [[ "$a" == "--session" ]] && mode=session
@@ -738,8 +739,8 @@ if [[ -n "${STUB_OPENCODE_BARRIER:-}" ]]; then
   : > "$STUB_OPENCODE_BARRIER/${PWD##*/}"
   n=0
   until [[ "$(ls "$STUB_OPENCODE_BARRIER" | wc -l)" -ge 2 ]]; do
-    if [[ $n -ge 600 ]]; then
-      echo 'もう一方のループの opencode が 60 秒たってもそろわない' >&2
+    if [[ $n -ge 1800 ]]; then
+      echo 'もう一方のループの opencode が 3 分たってもそろわない' >&2
       break
     fi
     n=$((n + 1))
