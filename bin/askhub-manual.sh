@@ -656,22 +656,25 @@ delete_loop_simulators() {
 # ループの Claude は .xcresult・スクリーンショット・ログなども ralph-dd の下に「<名前>-d<N>-」で始まる名前で置く（playbook の絶対禁止）。
 # 1 スロット 0.3〜7 GB あり、残すと担当者の Mac のディスクを使い切るので、Simulator と同じく、ゴール元の Discussion が閉じたら
 # 見張り役（見張り役が動いていなかったときは次の start の片付け）が消す。
-# <名前> は、start が案内する名前（メインの checkout のディレクトリ名から -ios を除いたもの）と、playbook に書いた ralph-dd/<名前>-d<N>-… の <名前>
-# （kit 1.10 までは、準備の Claude が名前を決めていた。例: dokogacha-app-ios の dokogacha）。
+# <名前> は、start が案内する名前（${STEM}。メインの checkout のディレクトリ名から -ios を除いたもの）と、playbook に書いた ralph-dd/<名前>-d<N>-… の <名前>
+# のうち $STEM の「-」より前の部分のもの（kit 1.10 までは、準備の Claude が名前を決めていた。例: dokogacha-app-ios の dokogacha）。
 # 消すのは ralph-dd の直下の、名前が「<名前>-d<N>-」か「<名前>-d<N>.」で始まるものだけ（d74 で d743 のものを消さない）。名前は正規表現を使わず字面で比べる。
 # ほかのループ・ほかのアプリ・接頭辞の無いもの（d<N>-… など。手で作ったものと見分けられない）は消さない
 DERIVED_DATA_DIR="$HOME/Library/Caches/ralph-dd"
 
 # このループの ralph-dd の <名前>（1 行に 1 つ。重なることがある）
 loop_derived_data_names() {
-  local token
+  local token name
   printf '%s\n' "$STEM"
   [[ -f "$PLAYBOOK" ]] || return 0
-  # playbook の ralph-dd/ に続く名前のうち、「-d<N>-」か「-d<N>.」を含むものの、最初のそれより前（ralph-dd/dokogacha-d5-$SLOT なら dokogacha）
+  # playbook の ralph-dd/ に続く名前のうち、「-d<N>-」か「-d<N>.」を含むものの、最初のそれより前（ralph-dd/dokogacha-d5-$SLOT なら dokogacha）。
+  # 使うのは、$STEM か、$STEM の「-」より前の部分（dokogacha-app の dokogacha）だけ。playbook がほかのアプリの ralph-dd
+  # （「ralph-dd/other-d5-a は使わない」など）に触れていても、その名前にはしない
   while IFS= read -r token; do
     token="${token#ralph-dd/}"
     if [[ "$token" == ?*"-d$LOOP_DISCUSSION"[-.]* ]]; then
-      printf '%s\n' "${token%%-d"$LOOP_DISCUSSION"[-.]*}"
+      name="${token%%-d"$LOOP_DISCUSSION"[-.]*}"
+      if [[ "$STEM" == "$name" || "$STEM" == "$name-"* ]]; then printf '%s\n' "$name"; fi
     fi
   done < <(grep -oE 'ralph-dd/[A-Za-z0-9._-]+' "$PLAYBOOK" 2>/dev/null || true)
 }
