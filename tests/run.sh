@@ -36,6 +36,10 @@ cat > "$WORK/bin/gh" <<'GH'
 # テスト用の gh。GitHub の代わりに、状態用の Issue・そのコメント・閉じた Discussion を GH_STATE のファイルで持つ。
 # 応答は JSON で作り、--jq があれば jq で絞る（本物の gh と同じく、文字列はそのまま出す）。書き込み権限を持つのは test だけ。
 # Discussion はどの番号も manual-loop 付きで test が担当。GH_STATE/closed-<番号> があれば閉じている。
+# GH_STATE/hold-<番号> があるあいだは、その Discussion が閉じたかの問い合わせに答えず、止めている印に GH_STATE/held-<番号> を置く
+# （見張り役を、記録・PID のファイルを読み終えた後の確認の途中で止める）。
+# コメントに書けた本文は、GH_STATE/comments/<id>/history に書き足していく（後から書き換わる状態を確かめる用）。
+# 本文より先に書き足す（本文で見えた状態は、履歴にもある）。
 # GH_STATE/needs-answer/<番号> があれば、その PR は needs-answer 付きで open。GH_STATE/pulls/<番号>.json は PR の行コメント（JSON の配列）。
 # GH_STATE/final-pr/<head の / を _ にしたもの> は、その head の PR の一覧（JSON の配列。最終 PR が既にあるとき）
 # gh のアカウントは GH_VIEWER（既定は test）。GH_LOG があれば、呼ばれた引数をそこに書き足す
@@ -88,6 +92,11 @@ case "${positional[0]:-} ${positional[1]:-}" in
   "repo view") echo '{"nameWithOwner":"example/myapp-ios"}' | out ;;
   "api user") jq -n --arg login "${GH_VIEWER:-test}" '{login: $login}' | out ;;
   "api graphql")
+    if [[ "$query" == *'{ closed }'* && -e "$S/hold-$number" ]]; then
+      touch "$S/held-$number"
+      while [[ -e "$S/hold-$number" ]]; do sleep 0.1; done
+      rm -f "$S/held-$number"
+    fi
     closed=false
     [[ -e "$S/closed-$number" ]] && closed=true
     case "$query" in
@@ -108,11 +117,13 @@ case "${positional[0]:-} ${positional[1]:-}" in
         mkdir -p "$S/comments/$id"
         printf '%s' "${rest%%/*}" > "$S/comments/$id/issue"
         printf '%s' test > "$S/comments/$id/login"
+        printf '%s\n' "$body" >> "$S/comments/$id/history"
         printf '%s' "$body" > "$S/comments/$id/body"
         now > "$S/comments/$id/updated"
         echo "{\"id\":$id}" | out ;;
       "PATCH comments/"*)
         [[ -d "$S/comments/${rest#comments/}" ]] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+        printf '%s\n' "$body" >> "$S/comments/${rest#comments/}/history"
         printf '%s' "$body" > "$S/comments/${rest#comments/}/body"
         now > "$S/comments/${rest#comments/}/updated" ;;
       "DELETE comments/"*)
@@ -466,10 +477,11 @@ manual() {
     scripts/askhub-manual.sh "$@")
 }
 loop_log() { sed -n 's/^log=//p' "${1:-$CTL}/.claude/askhub-manual.local.txt" | tail -n 1; }
-wait_for() { # 条件が成り立つまで待つ（最大 30 秒）
+wait_for() { # 条件が成り立つまで待つ（最大 3 分。負荷の高い Mac では、見張り役の 1 周や gh の呼び出しに数十秒かかることがある。
+  # 成り立てばすぐ進むので、通るときの時間は変わらない）
   local n=0
   until "$@"; do
-    [[ $n -lt 60 ]] || return 1
+    [[ $n -lt 360 ]] || return 1
     n=$((n + 1))
     sleep 0.5
   done
@@ -486,6 +498,14 @@ watch_exited() {
 }
 wait_watch_exit() { # 見張り役が終わるまで待つ（$1=制御用 worktree）。最後の状態の書き出しと、次の launch が記録ファイルを取り合わないように
   wait_for watch_exited "${1:-$CTL}" || fail "見張り役が終わらない: $(cat "$(loop_log "${1:-$CTL}")")"
+}
+hold_watch() { # Discussion $1 の見張り役を、次の「Discussion が閉じたか」の確認で止める（その周の記録・PID のファイルの読み出しは終わっている）
+  touch "$GH_STATE/hold-$1"
+  wait_for test -e "$GH_STATE/held-$1"
+}
+release_watch() { # 止めた見張り役を進める。問い合わせが返るまで待つ（続けて hold_watch したときに、同じ問い合わせを止めたままと取り違えない）
+  rm -f "$GH_STATE/hold-$1"
+  wait_for test ! -e "$GH_STATE/held-$1" || fail "止めた見張り役（Discussion $1）の問い合わせが返らない"
 }
 loop_comments() { # 状態用の Issue のコメントのうち、Discussion $1 の手動ループのもの（author が ${2:-test} のものの、目印の行）
   local d
@@ -690,15 +710,24 @@ LOG_106=$(loop_log "$D106")
 WATCH_106=$(sed -n 's/^watch_pid=//p' "$D106/.claude/askhub-manual.local.txt" | tail -n 1)
 wait_watch "$LOG_106"
 wait_for comment_has 106 '"state":"completed"' || fail "最終 PR を作った後に、Discussion 106 のコメントを完了にしていない"
+# 記録を消して別の PID を書くのは、見張り役を Discussion が閉じたかの確認で止めている間にする。負荷が高いと、
+# - ループ（2 秒で終わる）が launch の状態の書き出しより先に終わり、launch がコメントを先に「完了」と書くので、見張り役の final がまだ記録を書いている
+# - 見張り役は周ごとに記録と PID のファイルを別々に読むので、その間に消して書くと、自分のループの記録と別の PID を読んで引き継がれたとみなす
+# - 記録の有無を確かめてから sed で読むまでの間に消すと、sed の No such file がログに出る
+hold_watch 106 || fail "最終 PR を作った後に、見張り役が Discussion が閉じるのを待っていない: $(cat "$LOG_106")"
 rm -f "$D106/.claude/askhub-manual.local.txt"
 echo "$$" > "$D106/.claude/askhub-loop.pid"
-sleep 3
+release_watch 106
+# 次の確認まで進んでも（記録が無く、別の PID が書かれているのを読んでも）終わらない
+hold_watch 106 || fail "記録が消えて別の PID が書かれただけで、見張り役が終わった: $(cat "$LOG_106")"
 kill -0 "$WATCH_106" 2>/dev/null || fail "記録が消えて別の PID が書かれただけで、見張り役が終わった"
 # PID のファイルも消えても待ち続け、読めないことをログに書かない
 rm -f "$D106/.claude/askhub-loop.pid"
-sleep 3
+release_watch 106
+hold_watch 106 || fail "PID のファイルが消えただけで、見張り役が終わった: $(cat "$LOG_106")"
 kill -0 "$WATCH_106" 2>/dev/null || fail "PID のファイルが消えただけで、見張り役が終わった"
 touch "$GH_STATE/closed-106"
+release_watch 106
 wait_for eval '! kill -0 "$WATCH_106" 2>/dev/null' || fail "Discussion が閉じても、見張り役が終わらない"
 [[ "$(comment_count 106)" -eq 0 ]] || fail "記録が消えた後に Discussion が閉じたのに、コメントを消していない"
 [[ ! -e "$D106/.claude/askhub-manual.local.txt" ]] || fail "消えた記録を作り直した"
@@ -884,12 +913,10 @@ limit_loop() { # $1=Discussion の番号 $2=epic。start して playbook と goa
   perl -pi -e 's/\{\{[A-Z_]+\}\}/X/g' "$ctl/.claude/ralph-playbook.local.md"
   printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$ctl/.claude/ralph-goal.local.md"
 }
-comment_body() { # Discussion $1 の手動ループのコメントの本文
-  local d
-  for d in "$GH_STATE/comments"/*; do
-    [[ -f "$d/body" ]] || continue
-    if head -n 1 "$d/body" | grep -F "\"discussion\":$1," | grep -qF '"writer":"manual"'; then cat "$d/body"; fi
-  done
+written_bodies() { # Discussion $1 の手動ループのコメントに、これまでに書けた本文のうち、状態が $2 のもの（コメントの履歴から読む）
+  cat "$GH_STATE"/comments/*/history 2>/dev/null | awk -v d="\"discussion\":$1," -v s="\"state\":\"$2\"" '
+    /^<!-- ask-hub:loop-status / { keep = index($0, d) && index($0, s) && index($0, "\"writer\":\"manual\"") }
+    keep'
 }
 limit_launch() { # $1=Discussion の番号 $2=解除までの秒数 $3=ASKHUB_AUTO_RESUME（既定 1）。1 回目は利用上限で止まるループを起動する
   local n="$1" wait="$2" auto="${3:-1}"
@@ -902,13 +929,21 @@ limit_launch() { # $1=Discussion の番号 $2=解除までの秒数 $3=ASKHUB_AU
 D110="$WORK/repos/myapp-ralph-d110-ctl"
 limit_loop 110 epic/manual-ten
 : > "$WORK/gh.log"
-limit_launch 110 6
+limit_launch 110 20
 LOG_110=$(loop_log "$D110")
-wait_for comment_has 110 '"state":"usage-limited"' || fail "利用上限で止まったのに、ループの状態を上限で待機中にしていない: $(loop_comments 110) $(cat "$LOG_110")"
-comment_has 110 '"usageLimitedUntil":"' || fail "上限で待機中の状態に、解除の時刻を書いていない: $(loop_comments 110)"
-comment_body 110 | grep -q '^| 上限の解除 | ' || fail "コメントの表に、上限の解除の時刻を書いていない: $(comment_body 110)"
-grep -q '利用上限で止まりました' "$LOG_110" || fail "利用上限で止まったことを、ループのログに書いていない: $(cat "$LOG_110")"
-grep -q '^usage_limited_until=' "$D110/.claude/askhub-manual.local.txt" || fail "解除の時刻を記録していない"
+# 上限で待機中の状態（解除の時刻つき）と記録は、解除まで 600 秒の次のテストで確かめる。ここは解除が近いので、負荷が高いと
+# 見張り役が状態を求める前に解除の時刻を過ぎ（待機中ではなく異常終了と書く）、確かめ終える前に再開して書き換わる
+wait_for grep -q '利用上限で止まりました' "$LOG_110" || fail "利用上限で止まったことを、ループのログに書いていない: $(cat "$LOG_110")"
+# 解除の時刻（偽の claude が上限のメッセージに書いた時刻）を過ぎてから、再開を待つ。それまでに再開したら落とす
+# （ログの場所を読んでから時刻を比べる。逆の順だと、解除の時刻ちょうどの正しい再開を、早すぎる再開と取り違える）
+RESET_110=$(sed -n 's/^Claude AI usage limit reached|//p' "$LOG_110")
+[[ "$RESET_110" =~ ^[0-9]+$ ]] || fail "ループのログに、上限のメッセージが無い: $(cat "$LOG_110")"
+while :; do
+  CURRENT_110=$(loop_log "$D110")
+  (( $(date +%s) < RESET_110 )) || break
+  [[ "$CURRENT_110" == "$LOG_110" ]] || fail "解除の時刻より前に、ループを再開した: $(cat "$LOG_110")"
+  sleep 1
+done
 wait_for eval '[[ "$(loop_log "$D110")" != "$LOG_110" ]]' || fail "解除の時刻を過ぎても、ループを再開していない: $(cat "$LOG_110")"
 grep -q '解除の時刻を過ぎたので、ループを再開します' "$LOG_110" || fail "再開したことを、止まったループのログに書いていない"
 wait_watch "$(loop_log "$D110")"
@@ -918,8 +953,9 @@ wait_for comment_has 110 '"state":"completed"' || fail "再開したループが
 comment_has 110 'usageLimitedUntil' && fail "完了したのに、解除の時刻が残っている"
 touch "$GH_STATE/closed-110"
 wait_watch_exit "$D110"
-ok "ループが Claude の利用上限で止まったら、見張り役が上限で待機中と書き、解除の時刻の後に再開する"
+ok "ループが Claude の利用上限で止まったら、見張り役は解除の時刻を過ぎてから再開する（それより前には再開しない）"
 
+# 見張り役は解除を待っている間、ループの状態を上限で待機中（解除の時刻つき）で書き、解除の時刻を記録する。
 # 解除を待っている間に担当者が resume したら、待っていた見張り役は何もせずに終わり、新しいループの見張り役に任せる
 D111="$WORK/repos/myapp-ralph-d111-ctl"
 limit_loop 111 epic/manual-eleven
@@ -927,6 +963,10 @@ limit_loop 111 epic/manual-eleven
 limit_launch 111 600
 LOG_111=$(loop_log "$D111")
 wait_for comment_has 111 '"state":"usage-limited"' || fail "利用上限で止まったのに、上限で待機中にしていない: $(cat "$LOG_111")"
+# 解除まで 600 秒あるので、確かめ終える前に解除の時刻を過ぎることはない。コメントの内容は、書けた本文の履歴で確かめる
+written_bodies 111 usage-limited | grep -q '"usageLimitedUntil":"' || fail "上限で待機中の状態に、解除の時刻を書いていない: $(written_bodies 111 usage-limited)"
+written_bodies 111 usage-limited | grep -q '^| 上限の解除 | ' || fail "コメントの表に、上限の解除の時刻を書いていない: $(written_bodies 111 usage-limited)"
+grep -q '^usage_limited_until=' "$D111/.claude/askhub-manual.local.txt" || fail "解除の時刻を記録していない"
 STUB_LOOP=promise manual resume 111 >/dev/null || fail "解除を待っている間の resume が失敗した"
 grep -q '^usage_limited_until=' "$D111/.claude/askhub-manual.local.txt" && fail "resume で起動し直したのに、解除の時刻の記録が残っている"
 wait_for grep -q '別のループが起動しているため、自動では再開しません' "$LOG_111" || fail "resume したのに、待っていた見張り役が終わらない: $(cat "$LOG_111")"
@@ -934,7 +974,7 @@ wait_watch "$(loop_log "$D111")"
 grep -q -- '^pr create .*--head epic/manual-eleven' "$WORK/gh.log" || fail "resume したループの見張り役が、最終 PR を作っていない"
 touch "$GH_STATE/closed-111"
 wait_watch_exit "$D111"
-ok "解除を待っている間に resume したら、待っていた見張り役は自動では再開しない"
+ok "利用上限で止まったら、見張り役は上限で待機中（解除の時刻つき）と書いて記録し、解除を待っている間に resume したら自動では再開しない"
 
 # 解除を待っている間に ralph-stop.sh で止めたら、自動では再開しない（ループの状態は開始待ちに戻す）
 D112="$WORK/repos/myapp-ralph-d112-ctl"
