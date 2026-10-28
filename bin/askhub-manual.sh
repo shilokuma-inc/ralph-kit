@@ -572,14 +572,20 @@ sweep_finished_loops() {
       use_loop "$n" "$ctl"
       if loop_alive; then exit 0; fi
       delete_loop_simulators echo || true
-      # DerivedData などは 1 エピックで数十万ファイルになり、消し終えるまで数分かかることがあるので、start を待たせないよう裏で消す
-      # （結果はループのログに書く。start が終わっても止まらないよう、端末の HUP は無視する）
+      # DerivedData などは 1 エピックで数十万ファイルになり、消し終えるまで数分かかることがあるので、start を待たせないよう裏で消し、
+      # 消し終えてからこのループを終える（途中で止まった（Mac の再起動など）ときは、終えた記録が無いので次の start がやり直す）。
+      # 結果はループのログに書く。start が終わっても止まらないよう、端末の HUP は無視する
       if [[ "${ASKHUB_DELETE_DERIVED_DATA:-1}" != 0 && -n "$(loop_derived_data)" ]]; then
         log=$(state_get log)
         [[ -n "$log" ]] || log="$LOG_DIR/$STEM-d$n-cleanup-$(date +%Y%m%d-%H%M%S).log"
         mkdir -p "$(dirname "$log")"
-        ( trap '' HUP; delete_loop_derived_data watch_note ) </dev/null >>"$log" 2>&1 &
-        echo "Discussion #$n の手動ループのスロットの DerivedData など（ralph-dd の、このループのもの）を裏で消しています（結果は ${log}）"
+        (
+          trap '' HUP
+          delete_loop_derived_data watch_note || true
+          if end_loop >/dev/null; then watch_note "ゴール元の Discussion #$n が閉じているので、ループの状態のコメントを消しました"; fi
+        ) </dev/null >>"$log" 2>&1 &
+        echo "Discussion #$n の手動ループは終わっている（Discussion が閉じている）ので、スロットの DerivedData など（ralph-dd の、このループのもの）を裏で消してから、ループの状態のコメントを消します（結果は ${log}）"
+        exit 0
       fi
       end_loop >/dev/null && echo "Discussion #$n の手動ループは終わっている（Discussion が閉じている）ので、ループの状態のコメントを消しました"
     ) </dev/null || true
@@ -703,7 +709,9 @@ delete_loop_derived_data() {
   while IFS= read -r entry; do
     # ralph-dd の直下のもの（絶対パス）でなければ消さない（相対パスは、見張り役の作業ディレクトリ（メインの checkout）のものになる）
     [[ "$entry" == "$DERIVED_DATA_DIR/"?* && "${entry#"$DERIVED_DATA_DIR/"}" != */* ]] || continue
-    if rm -rf -- "$entry" 2>/dev/null && [[ ! -e "$entry" && ! -L "$entry" ]]; then
+    # 消せたかは、rm の終了コードではなく残っていないかで見る（start の片付けと見張り役が同時に消すと、rm は消えた途中のものでエラーを返す）
+    rm -rf -- "$entry" 2>/dev/null || true
+    if [[ ! -e "$entry" && ! -L "$entry" ]]; then
       "$report" "スロットの DerivedData などを消しました: $entry"
     else
       "$report" "スロットの DerivedData などを消せませんでした: ${entry}。rm -rf で消してください"
