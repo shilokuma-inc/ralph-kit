@@ -28,6 +28,12 @@ if LC_ALL=C grep -n -E '\$[A-Za-z_][A-Za-z0-9_]*[^ -~[:space:]]' "$KIT"/bin/*.sh
   fail "変数の直後に全角文字が続いています（\${VAR} のように波かっこで囲む）"
 fi
 ok "変数の直後に全角文字を続けていない"
+# mktemp の template は X で終える（BSD（macOS）の mktemp は末尾の X しか置き換えないので、X の後ろに拡張子などがあると
+# 毎回同じ名前で作り、同時に動くもう一方が作れずに落ちる。Linux の GNU の mktemp は置き換えるので、CI では流しても気づけない）
+if grep -n -E 'mktemp.*XXX+[^X"[:space:])]' "$KIT"/bin/*.sh "$KIT"/install.sh "$KIT"/shim/scripts/*.sh; then
+  fail "mktemp の template の X の後ろに文字が続いています（拡張子を付けず X で終えるか、mktemp -d で作ったディレクトリの中に置く）"
+fi
+ok "mktemp の template を X で終えている"
 
 # ---- 環境: 偽の gh・HOME・kit の取得元 ---------------------------------------------------
 mkdir -p "$WORK/bin" "$WORK/home/.claude"
@@ -745,6 +751,9 @@ cat > "$WORK/bin/opencode" <<'OPENCODE'
 # ゴールを終えて「最終 PR に載せる内容」を書き、promise のテキストを出す（セッションの継続と再試行の確認）。
 # STUB_OPENCODE_STRAY=1 のときは、途中のメッセージに promise を出したまま、state を消して止まる
 # （完了語を出さずに終わったのに、見張り役が最終 PR を作らないことの確認用）
+# STUB_OPENCODE_BARRIER=<ディレクトリ> のときは、そこに自分のリポジトリの名前のファイルを置き、ファイルが 2 つに
+# なる（もう一方のループの opencode も起動する）まで最大 3 分待ってから promise を出す（ループを同時に動かす確認用。
+# 負荷の高い Mac では、もう一方のループの起動に数十秒かかることがある。そろえばすぐ進むので、通るときの時間は変わらない）
 mode=title model=no
 for a in "$@"; do
   [[ "$a" == "--session" ]] && mode=session
@@ -755,6 +764,20 @@ done
   printf 'arg: %s\n' "$@"
 } >> "${STUB_OPENCODE_LOG:-/dev/null}"
 echo '{"type":"step_start","sessionID":"ses_test"}'
+if [[ -n "${STUB_OPENCODE_BARRIER:-}" ]]; then
+  : > "$STUB_OPENCODE_BARRIER/${PWD##*/}"
+  n=0
+  until [[ "$(ls "$STUB_OPENCODE_BARRIER" | wc -l)" -ge 2 ]]; do
+    if [[ $n -ge 1800 ]]; then
+      echo 'もう一方のループの opencode が 3 分たってもそろわない' >&2
+      break
+    fi
+    n=$((n + 1))
+    sleep 0.1
+  done
+  echo '{"type":"text","sessionID":"ses_test","part":{"type":"text","messageID":"msg_1","text":"作業を終えました。\n<promise>SMOKE DONE</promise>"}}'
+  exit 0
+fi
 if [[ "${STUB_OPENCODE_STRAY:-}" == 1 ]]; then
   if [[ "$mode" == session ]]; then
     echo '{"type":"text","sessionID":"ses_test","part":{"type":"text","messageID":"msg_3","text":"指示どおり、state を消して止めます。"}}'
@@ -872,6 +895,50 @@ touch "$GH_STATE/closed-109"
 wait_watch_exit "$D109"
 [[ "$(comment_count 109)" -eq 0 ]] || fail "Discussion が閉じたのに、OpenCode のループのコメントを消していない"
 ok "ループが完了語を出さずに終わったときは、途中のメッセージの promise がログにあっても、見張り役は最終 PR を作らない"
+
+# 同じ Mac で OpenCode のループを 2 つ同時に回しても、opencode の出力の一時ファイルがぶつからない（BSD の mktemp は
+# template の末尾の X しか置き換えないので、X の後ろに拡張子を付けると毎回同じ名前になり、後から起動したほうが作れずに止まっていた）。
+# 偽の opencode は両方のループの opencode がそろうまで待つので、2 つのループは一時ファイルを持ったまま同時に動く
+OPENCODE_LOOP="$(cd "$APP" && scripts/ralph-kit.sh path)/bin/opencode-loop.sh"
+oc_repo() { # $1=名前。opencode-loop.sh だけで回すリポジトリ（state だけを置く）を作る
+  git init --quiet "$WORK/$1"
+  mkdir -p "$WORK/$1/.claude"
+  printf -- '---\nactive: true\niteration: 1\nsession_id:\nmax_iterations: 5\ncompletion_promise: "SMOKE DONE"\n---\n\n並べて回すテスト\n' \
+    > "$WORK/$1/.claude/ralph-loop.local.md"
+}
+oc_loop() { # $1=名前 $2=TMPDIR $3=偽の opencode がそろうのを待つ場所。opencode-loop.sh を裏で回す（$! がその PID）
+  (cd "$WORK/$1" && TMPDIR="$2" ASKHUB_OPENCODE_MAX_FAILS=3 ASKHUB_OPENCODE_FAIL_SLEEP=0 STUB_OPENCODE_BARRIER="$3" \
+    exec "$OPENCODE_LOOP" "SMOKE DONE") > "$WORK/$1.log" 2>&1 &
+}
+mkdir -p "$WORK/oc-tmp" "$WORK/oc-barrier"
+oc_repo oc-a
+oc_repo oc-b
+oc_loop oc-a "$WORK/oc-tmp" "$WORK/oc-barrier"
+PID_OC_A=$!
+oc_loop oc-b "$WORK/oc-tmp" "$WORK/oc-barrier"
+PID_OC_B=$!
+wait "$PID_OC_A" || fail "同時に回した 1 つ目の OpenCode のループが失敗した: $(cat "$WORK/oc-a.log")"
+wait "$PID_OC_B" || fail "同時に回した 2 つ目の OpenCode のループが失敗した: $(cat "$WORK/oc-b.log")"
+for name in oc-a oc-b; do
+  grep -q '完了語を検知しました（1 周）' "$WORK/$name.log" || fail "同時に回した OpenCode のループが 1 周で終わっていない: $(cat "$WORK/$name.log")"
+  ! grep -Eq 'File exists|No such file|そろわない' "$WORK/$name.log" || fail "同時に回した OpenCode のループの一時ファイルがぶつかった: $(cat "$WORK/$name.log")"
+done
+[[ -z "$(ls -A "$WORK/oc-tmp")" ]] || fail "OpenCode のループが終わったのに、一時ファイルが残っている: $(ls -A "$WORK/oc-tmp")"
+ok "同じ Mac で OpenCode のループを 2 つ同時に回しても、一時ファイルがぶつからず、終わったら片付ける"
+
+# 周回の途中で止めたとき（TERM）も、一時ファイルを片付ける
+mkdir -p "$WORK/oc-tmp-term" "$WORK/oc-barrier-term"
+oc_repo oc-c
+oc_loop oc-c "$WORK/oc-tmp-term" "$WORK/oc-barrier-term"
+PID_OC_C=$!
+wait_for test -e "$WORK/oc-barrier-term/oc-c" || fail "OpenCode のループが opencode を起動しない: $(cat "$WORK/oc-c.log")"
+[[ -n "$(ls -A "$WORK/oc-tmp-term")" ]] || fail "周回中の OpenCode のループの一時ファイルが、TMPDIR の下に無い"
+kill -TERM "$PID_OC_C"
+rc=0
+wait "$PID_OC_C" || rc=$?
+[[ "$rc" -eq 130 ]] || fail "TERM で止めた OpenCode のループの終了コードが 130 ではない（${rc}）: $(cat "$WORK/oc-c.log")"
+[[ -z "$(ls -A "$WORK/oc-tmp-term")" ]] || fail "TERM で止めた OpenCode のループが、一時ファイルを片付けていない: $(ls -A "$WORK/oc-tmp-term")"
+ok "周回の途中で止めた OpenCode のループも、一時ファイルを片付ける"
 
 # ASKHUB_AGENT の値が分からないときは起動せずに断る（書き間違いで Claude のループを起動しない）
 if ASKHUB_AGENT=bogus manual launch 108 "SMOKE DONE" >"$WORK/bogus.out" 2>&1; then fail "ASKHUB_AGENT の知らない値で起動した"; fi

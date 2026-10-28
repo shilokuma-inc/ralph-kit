@@ -3,6 +3,16 @@
 各アプリのリポジトリは `.claude/ralph/kit.conf` の `ref=v1` で、v1 の最新を使う（`VERSION` を上げた PR が main に入ると、`release.yml` が `v1` を動かす）。
 互換を崩す変更（各リポジトリの中継・`kit.conf`・ワークフローの呼び出しの形を変える必要があるもの）は v2 にする。
 
+## 1.10.1（2026-10-28）
+
+- 同じ Mac で `ASKHUB_AGENT=opencode` の手動ループが 2 つ同時に動くと、後から起動したほうが周回できずに止まっていたのを直した（#35）。
+  `bin/opencode-loop.sh` は opencode の出力の置き場を `mktemp "${TMPDIR:-/tmp}/opencode-loop.XXXXXX.json"` で作っていたが、
+  macOS（BSD）の `mktemp` は template の末尾の X しか置き換えないので、毎回 `opencode-loop.XXXXXX.json` という同じ名前になっていた。
+  後のほうは `mkstemp failed … File exists` で置き場が無いまま毎周 opencode を起動できず、連続失敗の上限で止まっていた
+  - 置き場は `mktemp -d` でループごとに作ったディレクトリにし、ループが終わったとき・止めたとき（INT・TERM）にディレクトリごと消す
+  - 置き場を作れなかったときは、周回に入らずにエラーで止まる
+  - この版から起動した（`launch` / `resume` した）ループから効く。動いているループは、起動したときの版のまま
+
 ## 1.10.0（2026-10-27）
 
 手動ループのゴール元の Discussion が閉じたら、見張り役（`watch-final`）がそのループのスロット用の Simulator を消すようにした（#31）。

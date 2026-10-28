@@ -142,10 +142,13 @@ echo "  モデル      : ${MODEL:-OpenCode の既定}"
 echo "  完了語      : ${PROMISE}"
 echo "  状態        : tail -f でこの出力を追う。止めるには制御用 worktree で scripts/ralph-stop.sh"
 
-OUT=$(mktemp "${TMPDIR:-/tmp}/opencode-loop.XXXXXX.json")
-ERR=$(mktemp "${TMPDIR:-/tmp}/opencode-loop.XXXXXX.err")
+# opencode の出力は、このループ用に作ったディレクトリに置く。BSD（macOS）の mktemp は template の末尾の X しか
+# 置き換えないので、X の後ろに拡張子を付けると毎回同じ名前になり、同じ Mac で 2 つ目のループが作れずに落ちる
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/opencode-loop.XXXXXX") || fail "一時ディレクトリを作れません: ${TMPDIR:-/tmp}"
+OUT="$TMP_DIR/out.json"
+ERR="$TMP_DIR/err"
 CURRENT_CHILD=""
-trap 'rm -f "$OUT" "$ERR"' EXIT
+trap 'rm -rf "$TMP_DIR"' EXIT
 trap 'echo; echo "中断しました。state を消して止まります（続きから回すには scripts/askhub-manual.sh resume）" >&2; rm -f "$STATE"; kill -TERM "${CURRENT_CHILD:-}" 2>/dev/null || true; exit 130' INT TERM
 
 SID=""
