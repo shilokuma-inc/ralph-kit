@@ -1314,6 +1314,14 @@ NEXT
         fi
       done <<<"$SIMULATORS"
     fi
+    # スロットの DerivedData なども消さない（resume で続けると、またビルドに使う）
+    DERIVED_DATA=$(loop_derived_data)
+    if [[ -n "$DERIVED_DATA" ]]; then
+      echo "スロットの DerivedData など（${DERIVED_DATA_DIR}）も残しています。要らなければ、次で消してください:"
+      while IFS= read -r entry; do
+        printf '  rm -rf %q\n' "$entry"
+      done <<<"$DERIVED_DATA"
+    fi
     ;;
 
   final)
