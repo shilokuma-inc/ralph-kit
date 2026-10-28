@@ -30,9 +30,10 @@
 #              resume で再開したループの後は、open な最終 PR の本文を今の内容で書き直す
 #              ふだんは見張り役が呼ぶ。手で呼ぶのは、見張り役が動かなかったとき（Mac の再起動など）や ASKHUB_AUTO_FINAL=0 のとき
 #   7. 終わり: 見張り役は、ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる）のを待ち、このループのスロット用の Simulator
-#              （playbook に UDID を書いた <アプリ名> d<番号>-…）とコメントを消す（ASKHUB_DELETE_SIMULATORS=0 なら Simulator は消さない）。
+#              （playbook に UDID を書いた <アプリ名> d<番号>-…）・DerivedData など（~/Library/Caches/ralph-dd の <名前>-d<番号>-…）とコメントを消す
+#              （ASKHUB_DELETE_SIMULATORS=0 なら Simulator は、ASKHUB_DELETE_DERIVED_DATA=0 なら DerivedData などは消さない）。
 #              見張り役が動いていなかったときは、次の start（同じリポジトリのどの Discussion でも）が消す
-#      end:    Discussion を閉じずにループをやめるときに、このループのコメントを消す（作業場所・スロット用の Simulator は消さず、消し方を表示する）
+#      end:    Discussion を閉じずにループをやめるときに、このループのコメントを消す（作業場所・スロット用の Simulator・DerivedData などは消さず、消し方を表示する）
 #
 # 必要なもの: gh（このリポジトリに書き込み権限のあるアカウントでログイン済み）・git・jq・claude（ralph-loop プラグイン入り。
 #             ASKHUB_AGENT=opencode のときは claude の代わりに OpenCode の CLI）
@@ -559,10 +560,10 @@ end_loop() {
   state_set ended_at "$(iso_now)"
 }
 
-# この Mac のほかの手動ループのうち、ゴール元の Discussion が閉じたもののコメントとスロット用の Simulator を消す
+# この Mac のほかの手動ループのうち、ゴール元の Discussion が閉じたもののコメントとスロット用の Simulator・DerivedData などを消す
 # （見張り役が、Discussion が閉じるのを待てなかったとき（Mac の再起動など）の後片付け）
 sweep_finished_loops() {
-  local n ctl
+  local n ctl log
   while IFS=$'\t' read -r n ctl; do
     [[ -n "$n" && "$n" != "$LOOP_DISCUSSION" ]] || continue
     [[ "$(discussion_closed "$n" </dev/null 2>/dev/null || true)" == true ]] || continue
@@ -571,6 +572,15 @@ sweep_finished_loops() {
       use_loop "$n" "$ctl"
       if loop_alive; then exit 0; fi
       delete_loop_simulators echo || true
+      # DerivedData などは 1 エピックで数十万ファイルになり、消し終えるまで数分かかることがあるので、start を待たせないよう裏で消す
+      # （結果はループのログに書く。start が終わっても止まらないよう、端末の HUP は無視する）
+      if [[ "${ASKHUB_DELETE_DERIVED_DATA:-1}" != 0 && -n "$(loop_derived_data)" ]]; then
+        log=$(state_get log)
+        [[ -n "$log" ]] || log="$LOG_DIR/$STEM-d$n-cleanup-$(date +%Y%m%d-%H%M%S).log"
+        mkdir -p "$(dirname "$log")"
+        ( trap '' HUP; delete_loop_derived_data watch_note ) </dev/null >>"$log" 2>&1 &
+        echo "Discussion #$n の手動ループのスロットの DerivedData など（ralph-dd の、このループのもの）を裏で消しています（結果は ${log}）"
+      fi
       end_loop >/dev/null && echo "Discussion #$n の手動ループは終わっている（Discussion が閉じている）ので、ループの状態のコメントを消しました"
     ) </dev/null || true
   done < <(manual_loops)
@@ -638,6 +648,62 @@ delete_loop_simulators() {
       failed=true
     fi
   done <<<"$sims"
+  [[ "$failed" != true ]]
+}
+
+# ---- スロットの DerivedData など（ralph-dd）---------------------------------------------------
+# 準備の Claude は、スロットごとの DerivedData（-derivedDataPath）を ~/Library/Caches/ralph-dd/<名前>-d<N>-<スロット> に置き、
+# ループの Claude は .xcresult・スクリーンショット・ログなども ralph-dd の下に「<名前>-d<N>-」で始まる名前で置く（playbook の絶対禁止）。
+# 1 スロット 0.3〜7 GB あり、残すと担当者の Mac のディスクを使い切るので、Simulator と同じく、ゴール元の Discussion が閉じたら
+# 見張り役（見張り役が動いていなかったときは次の start の片付け）が消す。
+# <名前> は、start が案内する名前（メインの checkout のディレクトリ名から -ios を除いたもの）と、playbook に書いた ralph-dd/<名前>-d<N>-… の <名前>
+# （kit 1.10 までは、準備の Claude が名前を決めていた。例: dokogacha-app-ios の dokogacha）。
+# 消すのは ralph-dd の直下の、名前が「<名前>-d<N>-」か「<名前>-d<N>.」で始まるものだけ（d74 で d743 のものを消さない）。名前は正規表現を使わず字面で比べる。
+# ほかのループ・ほかのアプリ・接頭辞の無いもの（d<N>-… など。手で作ったものと見分けられない）は消さない
+DERIVED_DATA_DIR="$HOME/Library/Caches/ralph-dd"
+
+# このループの ralph-dd の <名前>（1 行に 1 つ。重なることがある）
+loop_derived_data_names() {
+  local token
+  printf '%s\n' "$STEM"
+  [[ -f "$PLAYBOOK" ]] || return 0
+  # playbook の ralph-dd/ に続く名前のうち、「-d<N>-」か「-d<N>.」を含むものの、最初のそれより前（ralph-dd/dokogacha-d5-$SLOT なら dokogacha）
+  while IFS= read -r token; do
+    token="${token#ralph-dd/}"
+    if [[ "$token" == ?*"-d$LOOP_DISCUSSION"[-.]* ]]; then
+      printf '%s\n' "${token%%-d"$LOOP_DISCUSSION"[-.]*}"
+    fi
+  done < <(grep -oE 'ralph-dd/[A-Za-z0-9._-]+' "$PLAYBOOK" 2>/dev/null || true)
+}
+
+# このループの ralph-dd のもの（パス。1 行に 1 つ）。ralph-dd が無いときは空
+loop_derived_data() {
+  local name entry
+  [[ -d "$DERIVED_DATA_DIR" && "$LOOP_DISCUSSION" =~ ^[0-9]+$ ]] || return 0
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    for entry in "$DERIVED_DATA_DIR/$name-d$LOOP_DISCUSSION"-* "$DERIVED_DATA_DIR/$name-d$LOOP_DISCUSSION".*; do
+      # 当たるものが無いときは、glob が展開されないまま残るので飛ばす（リンク先の無いシンボリックリンクは拾う）
+      if [[ -e "$entry" || -L "$entry" ]]; then printf '%s\n' "$entry"; fi
+    done
+  done < <(loop_derived_data_names | sort -u) | sort -u
+}
+
+# このループの ralph-dd のものを消す。$1 は 1 行ずつ結果を書く関数（watch_note・echo）。
+# ASKHUB_DELETE_DERIVED_DATA=0 なら消さない。消せないものがあれば失敗にする（ほかのものは消し続ける）
+delete_loop_derived_data() {
+  local report="$1" entries entry failed=false
+  [[ "${ASKHUB_DELETE_DERIVED_DATA:-1}" != 0 ]] || return 0
+  entries=$(loop_derived_data)
+  [[ -n "$entries" ]] || return 0
+  while IFS= read -r entry; do
+    if rm -rf -- "$entry" 2>/dev/null && [[ ! -e "$entry" && ! -L "$entry" ]]; then
+      "$report" "スロットの DerivedData などを消しました: $entry"
+    else
+      "$report" "スロットの DerivedData などを消せませんでした: ${entry}。rm -rf で消してください"
+      failed=true
+    fi
+  done <<<"$entries"
   [[ "$failed" != true ]]
 }
 
@@ -849,13 +915,13 @@ start_final_watch() {
 watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 # 見張り役: ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを待ち、
-# このループのスロット用の Simulator を消して、このループを終える。
+# このループのスロット用の Simulator と DerivedData など（ralph-dd）を消して、このループを終える。
 # resume などで別のループが起動した・end で終えたら、何もせずに終わる（そちらに任せる）。
 # 記録・PID のファイルが消えても（作業場所を先に消したなど）待ち続ける（コメントを消すのに記録は要らない。終えると、次の start も見つけられない）。
 # 引き継ぐのは、このループの記録が残っているときだけ（固定パスの作業場所をオーケストレーターが作り直して、自分の PID を書いたときに終わらない）。
 # $1 が true（ループが完了語を出して終わった）なら、待っている間に回答待ちの PR の ask の回答を確かめ、付いていれば resume で再開する
 watch_until_closed() {
-  local answers="${1:-false}" noted=false simulators_checked=false pid ours interval
+  local answers="${1:-false}" noted=false slots_cleaned=false pid ours interval
   while :; do
     # 回答待ちの ask があるうちは、回答を早く拾えるよう短い間隔で確かめる
     interval="${ASKHUB_CLOSE_WATCH_INTERVAL:-600}"
@@ -877,11 +943,14 @@ watch_until_closed() {
       fi
       continue
     fi
-    # スロット用の Simulator は、閉じたのを最初に見たときに 1 回だけ消す（消せなかったものはログに書き、担当者に任せる）。
+    # スロット用の Simulator と DerivedData などは、閉じたのを最初に見たときに 1 回だけ消す（消せなかったものはログに書き、担当者に任せる）。
     # このループの記録が無ければ消さない（制御用 worktree の playbook が、もうこのループのものとは限らない）
-    if [[ "$simulators_checked" != true ]]; then
-      simulators_checked=true
-      if [[ "$ours" == true ]]; then delete_loop_simulators watch_note || true; fi
+    if [[ "$slots_cleaned" != true ]]; then
+      slots_cleaned=true
+      if [[ "$ours" == true ]]; then
+        delete_loop_simulators watch_note || true
+        delete_loop_derived_data watch_note || true
+      fi
     fi
     # このループの記録が無ければ、記録を作り直さずにコメントだけを消す（消した作業場所のディレクトリや、ほかのループの記録に書かない）
     if { [[ "$ours" == true ]] && end_loop >/dev/null; } || { [[ "$ours" != true ]] && delete_status_comments >/dev/null; }; then
