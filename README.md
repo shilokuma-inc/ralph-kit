@@ -287,8 +287,9 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    担当者が自分か確かめ、`ralph-setup.sh` でこの Discussion の制御用 worktree とスロットを作り（epic は `ASKHUB_BASE_BRANCH`（既定は `develop`）から切る）、epic を origin に push してから `ready-for-loop` を外し、ループの状態を「開始待ち」で書く。
    信用する author（書き込み権限を持つ人）と、次に埋める値（作業場所のパスを含む）を表示する
 2. 制御用 worktree の playbook の `{{...}}` を埋め（`TRUSTED_AUTHORS`・`WORKTREE_*` は start が表示した値）、STEP A に沿って goal を作る
-   （Discussion の、信用する author の本文・コメント・返信だけを使う）。検証コマンドの `-derivedDataPath` などスロットごとの場所は、
-   スロットのパスから作る（同じリポジトリのほかのループのスロットと共有しない）。
+   （Discussion の、信用する author の本文・コメント・返信だけを使う）。検証コマンドのスロットごとの場所は、同じリポジトリのほかのループのスロットと共有しない。
+   `-derivedDataPath` は `~/Library/Caches/ralph-dd/<名前>-d<N>-<スロット>` にし、`.xcresult`・スクリーンショット・ログなど
+   ralph-dd の下に置くものも、すべて `<名前>-d<N>-` で始める（Discussion が閉じたら見張り役が消す。下の 7。playbook の絶対禁止にも書いてある）。
    スロット専用の Simulator を作るときは、名前を `<アプリ名> d<N>-<スロットなど>`（例: `AskHub d743-a`・`PrimePick d409-ipad-b`）にし、
    UDID を playbook の「このアプリ固有の前提」に書く（Discussion が閉じたら見張り役が消す。下の 7）
 3. `scripts/askhub-manual.sh launch <N> "<完了語>"`。制御用 worktree でループをバックグラウンドで起動する。
@@ -347,10 +348,20 @@ GitHub で手で付けるときは、**最後の質問に回答する前に** `m
    名前は正規表現を使わず字面の前方一致で比べ、`d<N>-` まで含める（`d74` で `d743` の Simulator を消さない）ので、ほかのアプリ（同じ番号のものも）・ほかのループ・
    手で作った Simulator は消さない。playbook にアプリ名の違う同じ番号の Simulator が書かれていて 1 つに決まらないときは、何も消さない。
    消したもの・消せなかったもの（shutdown できなかったものも。消せなかったものには shutdown と delete の手順を添える）はループのログに `[askhub-manual …]` の行で残る。`ASKHUB_DELETE_SIMULATORS=0` を付けて `launch` / `resume`（下の `start` の片付けでは `start`）すると消さない。
+   同じときに、**このループのスロットの DerivedData など**（`~/Library/Caches/ralph-dd` の下。1 スロット 0.3〜7 GB）も消す。
+   消すのは ralph-dd の直下の、名前が `<名前>-d<N>-` か `<名前>-d<N>.` で始まるものだけ（`d74` で `d743` のものを消さない）。
+   `<名前>` は `start` が案内する名前（上の「作業場所」の `<名前>`）と、playbook に書いた `ralph-dd/<名前>-d<N>-…` の `<名前>` のうち `start` が案内する名前の
+   `-` より前の部分のもの（kit 1.10 までは準備の Claude が名前を決めていた。例: dokogacha-app-ios の `dokogacha`）。playbook がほかのアプリの ralph-dd に
+   触れていても、その名前にはしない。改行を含む名前は扱わない。名前は正規表現を使わず字面で比べるので、
+   ほかのループ・ほかのアプリ（同じ番号のものも）・接頭辞の無いもの（`d<N>-…`・`task16-…` など。手で作ったものと見分けられない）は消さない。
+   シンボリックリンクはリンクだけを消す。消したもの・消せなかったものはループのログに `[askhub-manual …]` の行で残る。
+   `ASKHUB_DELETE_DERIVED_DATA=0` を付けて `launch` / `resume`（`start` の片付けでは `start`）すると消さない。
    `resume` で別のループを起動したら、前の見張り役はそちらに任せて終わる（ほかに見張り役が終わるのは、`end` で終えたとき・リポジトリの checkout を消したときだけ。作業場所を消しても、Discussion が閉じるまで待ち続ける）。見張り役が動いていなかったとき（Mac の再起動など）は、
-   この Mac で同じリポジトリの手動ループを次に `start` したときに、Discussion の閉じたループのコメントとスロット用の Simulator を消す。
+   この Mac で同じリポジトリの手動ループを次に `start` したときに、Discussion の閉じたループのコメントとスロット用の Simulator・DerivedData などを消す
+   （DerivedData などは消し終えるまで数分かかることがあるので、`start` を待たせないよう裏で消し、消し終えてからコメントを消してループを終える。
+   途中で止まったら、終えた記録が無いので次の `start` がやり直す。結果はそのループのログに書く）。
    **Discussion を閉じずにやめる**ときは、ループを止めてから `scripts/askhub-manual.sh end <N>` でコメントを消す
-   （作業場所とスロット用の Simulator は消さない（`resume` で続けると使う）。消し方を表示する）。
+   （作業場所とスロット用の Simulator・DerivedData などは消さない（`resume` で続けると使う）。消し方を表示する）。
    終えたループは、`status` を流しても状態を書き直さず、見張り役も最終 PR を作らない（続けるなら `resume <N>`）。
    Discussion が open で `manual-loop` が付いたままだと、AskHub の「手動ループ」には「未開始」と開始の指示が出るので、やめるなら Discussion を閉じる
 
@@ -386,11 +397,12 @@ AskHub からコピーして Claude Code に貼る指示は、今までどおり
 | 制御用 worktree | `<名前>-ralph-d<N>-ctl`（記録 `.claude/askhub-manual.local.txt`・playbook・goal・state・PID） |
 | スロット | `<名前>-ralph-d<N>-a`・`<名前>-ralph-d<N>-b` |
 | ログ | `~/Library/Logs/askhub/manual/<名前>-d<N>-loop-<日時>.log` |
+| DerivedData など | `~/Library/Caches/ralph-dd/<名前>-d<N>-…`（準備の Claude とループが作る。Discussion が閉じたら見張り役が消す） |
 
 オーケストレーターの自動ループは `<名前>-ralph-ctl`・`-a`・`-b`（`ralph-setup.sh` の既定）を使い、手動ループはそこに触らない。
 同じ epic は 1 つの worktree でしか checkout できないので、ほかのループ（自動・手動）が使っている epic 名では `start` できない。
 終わった Discussion の作業場所は自動では消さない（goal・state の記録が残るため）。要らなくなったら `end` が表示するコマンドで消す。
-スロット用の Simulator（`<アプリ名> d<N>-…`）は、ゴール元の Discussion が閉じたら見張り役が消す（上の 7）。
+スロット用の Simulator（`<アプリ名> d<N>-…`）と DerivedData など（`~/Library/Caches/ralph-dd/<名前>-d<N>-…`）は、ゴール元の Discussion が閉じたら見張り役が消す（上の 7）。
 
 kit 1.3 までに `<名前>-ralph-ctl` で始めた手動ループは、**移さずにその場所のまま最後まで回す**（動いているループ・記録を壊さないため）。
 `resume` / `final` / `status` は、その Discussion の新しい作業場所が無く、`<名前>-ralph-ctl` の記録がその Discussion のもので、記録の epic を今も checkout していれば、そこを使う。
