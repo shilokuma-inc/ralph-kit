@@ -39,6 +39,7 @@ cat > "$WORK/bin/gh" <<'GH'
 # GH_STATE/hold-<番号> があるあいだは、その Discussion が閉じたかの問い合わせに答えず、止めている印に GH_STATE/held-<番号> を置く
 # （見張り役を、記録・PID のファイルを読み終えた後の確認の途中で止める）。
 # コメントに書けた本文は、GH_STATE/comments/<id>/history に書き足していく（後から書き換わる状態を確かめる用）。
+# 本文より先に書き足す（本文で見えた状態は、履歴にもある）。
 # GH_STATE/needs-answer/<番号> があれば、その PR は needs-answer 付きで open。GH_STATE/pulls/<番号>.json は PR の行コメント（JSON の配列）。
 # GH_STATE/final-pr/<head の / を _ にしたもの> は、その head の PR の一覧（JSON の配列。最終 PR が既にあるとき）
 # gh のアカウントは GH_VIEWER（既定は test）。GH_LOG があれば、呼ばれた引数をそこに書き足す
@@ -116,14 +117,14 @@ case "${positional[0]:-} ${positional[1]:-}" in
         mkdir -p "$S/comments/$id"
         printf '%s' "${rest%%/*}" > "$S/comments/$id/issue"
         printf '%s' test > "$S/comments/$id/login"
-        printf '%s' "$body" > "$S/comments/$id/body"
         printf '%s\n' "$body" >> "$S/comments/$id/history"
+        printf '%s' "$body" > "$S/comments/$id/body"
         now > "$S/comments/$id/updated"
         echo "{\"id\":$id}" | out ;;
       "PATCH comments/"*)
         [[ -d "$S/comments/${rest#comments/}" ]] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-        printf '%s' "$body" > "$S/comments/${rest#comments/}/body"
         printf '%s\n' "$body" >> "$S/comments/${rest#comments/}/history"
+        printf '%s' "$body" > "$S/comments/${rest#comments/}/body"
         now > "$S/comments/${rest#comments/}/updated" ;;
       "DELETE comments/"*)
         [[ -d "$S/comments/${rest#comments/}" ]] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
