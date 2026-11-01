@@ -224,24 +224,42 @@ setup_worktrees() {
 }
 
 # 記録（key=value）を読む・書く。
-# 書き換えは一時ファイルに書いてから mv で置き換える。launch / resume と見張り役が同時に書くことがあるので、一時ファイルは書き手ごとに別の名前にする
-# （同じ名前だと、一方の mv がもう一方の一時ファイルを持っていき、後の mv が No such file or directory で落ちる。#41）
+# 書き換えは一時ファイルに書いてから mv で置き換える。launch / resume と見張り役が同時に書くことがあるので（ループがすぐ終わったときなど）、
+# 読んでから置き換えるまでをロックで 1 つずつにし（でないと、後から置き換えたほうが先に書かれた行を消す）、
+# 一時ファイルも書き手ごとに別の名前にする（同じ名前だと、一方の mv がもう一方の一時ファイルを持っていき、後の mv が No such file or directory で落ちる。#41）
 state_get() { record_get "$STATE_FILE" "$1"; }
+# ロックは記録の横のディレクトリ（mkdir は取れたか取れなかったかが一度に決まる。空のディレクトリは git に載らない）。
+# 書き換えは一瞬で終わるので、30 秒待っても取れなければ（負荷の高い Mac で、ほかの書き手を何人か待つことはある）、持ち主が書き換えの途中で止められて残ったものとみなして捨て、取り直す
+state_lock() {
+  local since=$SECONDS
+  until mkdir "$STATE_FILE.lock" 2>/dev/null; do
+    if (( SECONDS - since >= 30 )); then
+      rmdir "$STATE_FILE.lock" 2>/dev/null || true
+      since=$SECONDS
+    fi
+    sleep 0.1
+  done
+}
+state_unlock() { rmdir "$STATE_FILE.lock" 2>/dev/null || true; }
 state_set() {
   mkdir -p "$(dirname "$STATE_FILE")"
+  state_lock
   touch "$STATE_FILE"
   local rest tmp
   rest=$(grep -v "^$1=" "$STATE_FILE" || true)
   tmp=$(mktemp "$STATE_FILE.XXXXXX")
   { [[ -n "$rest" ]] && printf '%s\n' "$rest"; printf '%s=%s\n' "$1" "$2"; } > "$tmp"
   mv "$tmp" "$STATE_FILE"
+  state_unlock
 }
 state_unset() {
   [[ -f "$STATE_FILE" ]] || return 0
+  state_lock
   local tmp
   tmp=$(mktemp "$STATE_FILE.XXXXXX")
   grep -v "^$1=" "$STATE_FILE" > "$tmp" || true
   mv "$tmp" "$STATE_FILE"
+  state_unlock
 }
 
 viewer() { gh api user --jq .login; }
