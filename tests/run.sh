@@ -989,8 +989,8 @@ ok "Claude の利用上限のメッセージから、オーケストレーター
 # 見張り役は、ループのログの末尾に Claude の利用上限のメッセージがあれば、ループの状態を「上限で待機中」（解除の時刻つき）で書き、
 # 解除の時刻を過ぎたら resume で再開する。再開したループの見張り役が、いつもどおり最終 PR を作る
 limit_loop() { # $1=Discussion の番号 $2=epic。start して playbook と goal を用意する
-  local ctl="$WORK/repos/myapp-ralph-d$1-ctl"
-  manual start "$1" "$2" >/dev/null 2>&1 || fail "Discussion $1 の手動ループを start できない"
+  local ctl="$WORK/repos/myapp-ralph-d$1-ctl" out
+  out=$(manual start "$1" "$2" 2>&1) || fail "Discussion $1 の手動ループを start できない: $out"
   perl -pi -e 's/\{\{[A-Z_]+\}\}/X/g' "$ctl/.claude/ralph-playbook.local.md"
   printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$ctl/.claude/ralph-goal.local.md"
 }
