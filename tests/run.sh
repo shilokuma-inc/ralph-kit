@@ -49,9 +49,19 @@ cat > "$WORK/bin/gh" <<'GH'
 # GH_STATE/needs-answer/<番号> があれば、その PR は needs-answer 付きで open。GH_STATE/pulls/<番号>.json は PR の行コメント（JSON の配列）。
 # GH_STATE/final-pr/<head の / を _ にしたもの> は、その head の PR の一覧（JSON の配列。最終 PR が既にあるとき）
 # gh のアカウントは GH_VIEWER（既定は test）。GH_LOG があれば、呼ばれた引数をそこに書き足す
+# GH_PROXY_CHECK=1 なら、本物の gh と同じく HTTPS_PROXY のプロキシ（http://<ホスト>:<ポート>）を通す（繋がらなければ proxyconnect のエラーで失敗する）。
+# GH_STATE/fail-<番号> があれば、その Discussion が閉じたかの問い合わせを失敗させる
 [[ -z "${GH_LOG:-}" ]] || printf '%s\n' "$*" >> "$GH_LOG"
 S="${GH_STATE:?}"
 mkdir -p "$S/issues" "$S/comments"
+if [[ "${GH_PROXY_CHECK:-}" == 1 && -n "${HTTPS_PROXY:-}" ]]; then
+  proxy="${HTTPS_PROXY#*://}"
+  proxy="${proxy%%/*}"
+  if ! (exec 3<>"/dev/tcp/${proxy%:*}/${proxy##*:}") 2>/dev/null; then
+    echo "Post \"https://api.github.com/graphql\": proxyconnect tcp: dial tcp ${proxy}: connect: connection refused" >&2
+    exit 1
+  fi
+fi
 
 jq_expr="" method="" body="" query="" number="" author="" label="" head=""
 positional=()
@@ -98,6 +108,10 @@ case "${positional[0]:-} ${positional[1]:-}" in
   "repo view") echo '{"nameWithOwner":"example/myapp-ios"}' | out ;;
   "api user") jq -n --arg login "${GH_VIEWER:-test}" '{login: $login}' | out ;;
   "api graphql")
+    if [[ "$query" == *'{ closed }'* && -e "$S/fail-$number" ]]; then
+      echo "GraphQL: テストで失敗させています (fail-$number)" >&2
+      exit 1
+    fi
     if [[ "$query" == *'{ closed }'* && -e "$S/hold-$number" ]]; then
       touch "$S/held-$number"
       while [[ -e "$S/hold-$number" ]]; do sleep 0.1; done
@@ -1363,6 +1377,69 @@ grep -q '裏で消しています' <<<"$OUT" && fail "ASKHUB_DELETE_DERIVED_DATA
 has_dd myapp-d133-a || fail "ASKHUB_DELETE_DERIVED_DATA=0 なのに、DerivedData などを消した"
 [[ "$(comment_count 133)" -eq 0 ]] || fail "ASKHUB_DELETE_DERIVED_DATA=0 のとき、ループの状態のコメントまで残した"
 ok "見張り役が動いていなかったループの ralph-dd は次の start が裏で消し、ASKHUB_DELETE_DERIVED_DATA=0 のときは消さない"
+
+# ---- launch したセッションのプロキシが消えた見張り役 -------------------------------------------------
+# launch / resume を流したシェルが、この Mac の中で待ち受けるプロキシ（セッションと一緒に消える）を HTTPS_PROXY で渡していると、
+# 見張り役の gh はそのプロキシを通る。プロキシが消えたら、見張り役はそれを外して直接繋ぎ、Discussion が閉じたのを見つけてコメントを消す（#39）
+start_proxy() { # この Mac の中で待ち受けるだけのプロキシを起動し、PROXY_PID と PROXY_PORT を決める
+  rm -f "$WORK/proxy.port" "$WORK/proxy.port.tmp"
+  perl -MIO::Socket::INET -e '
+    my $s = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => 0, Listen => 16, ReuseAddr => 1) or die "listen: $!";
+    open(my $f, ">", "$ARGV[0].tmp") or die "open: $!";
+    print $f $s->sockport;
+    close $f;
+    rename("$ARGV[0].tmp", $ARGV[0]) or die "rename: $!";
+    while (my $c = $s->accept) { close $c }' "$WORK/proxy.port" &
+  PROXY_PID=$!
+  wait_for test -s "$WORK/proxy.port" || fail "テスト用のプロキシを起動できない"
+  PROXY_PORT=$(cat "$WORK/proxy.port")
+}
+D150="$WORK/repos/myapp-ralph-d150-ctl"
+limit_loop 150 epic/proxy-fifty
+start_proxy
+: > "$WORK/gh.log"
+(
+  export GH_PROXY_CHECK=1 HTTPS_PROXY="http://127.0.0.1:$PROXY_PORT" STUB_LOOP=promise
+  manual launch 150 "SMOKE DONE" >/dev/null
+) || fail "Discussion 150 の launch が失敗した"
+LOG_150=$(loop_log "$D150")
+wait_watch "$LOG_150"
+grep -q '最終 PR を作りました' "$LOG_150" || fail "プロキシが生きている間に、見張り役が最終 PR を作っていない: $(cat "$LOG_150")"
+wait_for comment_has 150 '"state":"completed"' || fail "プロキシが生きている間に、ループの状態のコメントを完了にしていない: $(loop_comments 150)"
+grep -q 'プロキシ（' "$LOG_150" && fail "プロキシが生きているのに外した: $(cat "$LOG_150")"
+# launch したセッションを閉じた（プロキシが消えた）後に、最終 PR がマージされて Discussion が閉じる
+kill "$PROXY_PID"
+wait "$PROXY_PID" 2>/dev/null || true
+touch "$GH_STATE/closed-150"
+wait_watch_exit "$D150"
+[[ "$(comment_count 150)" -eq 0 ]] || fail "プロキシが消えた後に Discussion が閉じたのに、ループの状態のコメントを消していない: $(cat "$LOG_150")"
+grep -q "プロキシ（HTTPS_PROXY の 127.0.0.1:${PROXY_PORT}）に繋がらないため、外して GitHub に直接繋ぎます" "$LOG_150" \
+  || fail "プロキシを外したことをログに書いていない: $(cat "$LOG_150")"
+[[ "$(grep -c 'プロキシ（' "$LOG_150")" -eq 1 ]] || fail "プロキシを外したことを 2 回以上ログに書いた: $(cat "$LOG_150")"
+grep -q 'コメントを消しました' "$LOG_150" || fail "コメントを消したことをログに書いていない: $(cat "$LOG_150")"
+ok "launch したセッションのプロキシが消えたら、見張り役はプロキシを外して直接繋ぎ、Discussion が閉じたらコメントを消す"
+
+# Discussion が閉じたかを確かめられないときは、gh のエラーをログに 1 回だけ書き、確かめられるようになったら、そのことも書く
+closed_queries() { grep -F '{ closed }' "$WORK/gh.log" | grep -c -- "n=$1" || true; }
+D151="$WORK/repos/myapp-ralph-d151-ctl"
+limit_loop 151 epic/proxy-fifty-one
+: > "$WORK/gh.log"
+touch "$GH_STATE/fail-151"
+STUB_LOOP=promise manual launch 151 "SMOKE DONE" >/dev/null || fail "Discussion 151 の launch が失敗した"
+LOG_151=$(loop_log "$D151")
+wait_watch "$LOG_151"
+wait_for grep -q 'Discussion #151 が閉じたかを確かめられませんでした' "$LOG_151" || fail "確かめられなかったことをログに書いていない: $(cat "$LOG_151")"
+grep -q 'テストで失敗させています (fail-151)' "$LOG_151" || fail "確かめられなかったときの gh のエラーをログに書いていない: $(cat "$LOG_151")"
+# 何回か確かめ直しても、ログには 1 回だけ書く
+QUERIES=$(closed_queries 151)
+wait_for eval '[[ "$(closed_queries 151)" -ge $((QUERIES + 3)) ]]' || fail "確かめられなかった後に、確かめ直していない"
+[[ "$(grep -c '閉じたかを確かめられませんでした' "$LOG_151")" -eq 1 ]] || fail "確かめられなかったことを 2 回以上ログに書いた: $(cat "$LOG_151")"
+rm -f "$GH_STATE/fail-151"
+wait_for grep -q 'Discussion #151 が閉じたかを、また確かめられるようになりました' "$LOG_151" || fail "確かめられるようになったことをログに書いていない: $(cat "$LOG_151")"
+touch "$GH_STATE/closed-151"
+wait_watch_exit "$D151"
+[[ "$(comment_count 151)" -eq 0 ]] || fail "確かめられるようになった後に Discussion が閉じたのに、コメントを消していない: $(cat "$LOG_151")"
+ok "Discussion が閉じたかを確かめられないときは、gh のエラーをログに 1 回だけ書き、確かめられるようになったらそのことも書く"
 
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e
