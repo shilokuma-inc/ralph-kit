@@ -928,6 +928,47 @@ start_final_watch() {
 # 見張り役がループのログに書く 1 行
 watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+# 見張り役: プロキシの環境変数のうち、この Mac の中（127.*・localhost・::1）のポートを指していて、そこに繋がらないものを外す（GitHub に直接繋ぐ）。
+# 見張り役は launch / resume を流したシェルの環境を引き継ぐ。Claude Code をセッションごとに待ち受けるプロキシ経由で起動していると、
+# セッションを閉じたときにプロキシも消え、見張り役の gh が繋がらずに、Discussion が閉じたのを見落とし続ける（#39）。
+# 外の Mac のプロキシ（ネットワークの決まりで要ることがある）と、ポートを読み取れないものは触らない。
+# 外した変数は、このプロセスと、ここから流す final・resume（そのループと見張り役）には渡らない。外したことはループのログに書く（外した後は見ないので 1 回だけ）
+bypass_dead_local_proxy() {
+  local name value rest host port
+  for name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy; do
+    value="${!name:-}"
+    [[ -n "$value" ]] || continue
+    # スキーム（http:// など）・パス・ユーザー名とパスワードを除いて、ホストとポートを取り出す
+    rest="${value#*://}"
+    rest="${rest%%/*}"
+    rest="${rest##*@}"
+    if [[ "$rest" == \[* ]]; then
+      host="${rest%%]*}"
+      host="${host#\[}"
+      port="${rest#*]}"
+      port="${port#:}"
+    else
+      host="${rest%%:*}"
+      port=""
+      if [[ "$rest" == *:* ]]; then port="${rest#*:}"; fi
+    fi
+    [[ "$port" =~ ^[0-9]+$ ]] || continue
+    case "$host" in
+      127.* | localhost | ::1) ;;
+      *) continue ;;
+    esac
+    # 繋がれば、そのプロキシを使い続ける（launch / resume したセッションが生きている）
+    if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+      continue
+    fi
+    unset "$name"
+    # 値はログに書かない（ユーザー名とパスワードを含むことがある）
+    [[ "$host" != *:* ]] || host="[$host]"
+    watch_note "プロキシ（${name} の ${host}:${port}）に繋がらないため、外して GitHub に直接繋ぎます（launch / resume したセッションを閉じると、そのプロキシも消えることがあります）"
+  done
+  return 0
+}
+
 # 見張り役: ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを待ち、
 # このループのスロット用の Simulator と DerivedData など（ralph-dd）を消して、このループを終える。
 # resume などで別のループが起動した・end で終えたら、何もせずに終わる（そちらに任せる）。
@@ -950,6 +991,7 @@ watch_until_closed() {
     if [[ "$ours" == true ]] && { [[ -n "$pid" && "$pid" != "$WATCHED" ]] || [[ -n "$(state_get ended_at)" ]]; }; then
       return 0
     fi
+    bypass_dead_local_proxy
     if [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" != true ]]; then
       # 再開したら、このループの見張りは新しいループの見張り役に任せる
       if [[ "$answers" == true && "$ours" == true ]] && resume_after_answer; then
@@ -1085,6 +1127,7 @@ resume_after_usage_limit() {
     if [[ ! -f "$LOOP_STATE" ]]; then
       watch_note "ループが止められた（state ファイルが無い）ため、自動では再開しません（続けるなら scripts/askhub-manual.sh resume ${LOOP_DISCUSSION}）"
       state_unset usage_limited_until
+      bypass_dead_local_proxy
       write_status false true
       return 1
     fi
@@ -1093,6 +1136,8 @@ resume_after_usage_limit() {
     sleep "${ASKHUB_USAGE_LIMIT_INTERVAL:-60}"
   done
   state_unset usage_limited_until
+  # 解除を待つ間（数時間）に launch / resume したセッションが閉じていたら、そのプロキシは消えている（確認と再開の前に外す）
+  bypass_dead_local_proxy
   if [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" == true ]]; then
     watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じているため、自動では再開しません"
     return 1
@@ -1252,6 +1297,8 @@ NEXT
     while kill -0 "$WATCHED" 2>/dev/null; do
       sleep "${ASKHUB_FINAL_WATCH_INTERVAL:-30}"
     done
+    # ループが動いている間に launch / resume したセッションが閉じていたら、そのプロキシは消えている（最終 PR・状態の書き出しの前に外す）
+    bypass_dead_local_proxy
     # 見張っている間に resume などで別のループが起動していたら、そのループの見張り役に任せる
     if [[ "$({ tr -d '[:space:]' < "$PID_FILE"; } 2>/dev/null || true)" != "$WATCHED" ]]; then
       watch_note "別のループが起動しているため、最終 PR はそのループが終わってから作ります"
