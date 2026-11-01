@@ -223,20 +223,25 @@ setup_worktrees() {
   (cd "$MAIN" && RALPH_LOOP_ID="$id" "$KIT_DIR/bin/ralph-setup.sh" "$1" "$BASE_BRANCH" >/dev/null)
 }
 
-# 記録（key=value）を読む・書く
+# 記録（key=value）を読む・書く。
+# 書き換えは一時ファイルに書いてから mv で置き換える。launch / resume と見張り役が同時に書くことがあるので、一時ファイルは書き手ごとに別の名前にする
+# （同じ名前だと、一方の mv がもう一方の一時ファイルを持っていき、後の mv が No such file or directory で落ちる。#41）
 state_get() { record_get "$STATE_FILE" "$1"; }
 state_set() {
   mkdir -p "$(dirname "$STATE_FILE")"
   touch "$STATE_FILE"
-  local rest
+  local rest tmp
   rest=$(grep -v "^$1=" "$STATE_FILE" || true)
-  { [[ -n "$rest" ]] && printf '%s\n' "$rest"; printf '%s=%s\n' "$1" "$2"; } > "$STATE_FILE.tmp"
-  mv "$STATE_FILE.tmp" "$STATE_FILE"
+  tmp=$(mktemp "$STATE_FILE.XXXXXX")
+  { [[ -n "$rest" ]] && printf '%s\n' "$rest"; printf '%s=%s\n' "$1" "$2"; } > "$tmp"
+  mv "$tmp" "$STATE_FILE"
 }
 state_unset() {
   [[ -f "$STATE_FILE" ]] || return 0
-  grep -v "^$1=" "$STATE_FILE" > "$STATE_FILE.tmp" || true
-  mv "$STATE_FILE.tmp" "$STATE_FILE"
+  local tmp
+  tmp=$(mktemp "$STATE_FILE.XXXXXX")
+  grep -v "^$1=" "$STATE_FILE" > "$tmp" || true
+  mv "$tmp" "$STATE_FILE"
 }
 
 viewer() { gh api user --jq .login; }
