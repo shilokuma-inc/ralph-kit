@@ -49,9 +49,19 @@ cat > "$WORK/bin/gh" <<'GH'
 # GH_STATE/needs-answer/<番号> があれば、その PR は needs-answer 付きで open。GH_STATE/pulls/<番号>.json は PR の行コメント（JSON の配列）。
 # GH_STATE/final-pr/<head の / を _ にしたもの> は、その head の PR の一覧（JSON の配列。最終 PR が既にあるとき）
 # gh のアカウントは GH_VIEWER（既定は test）。GH_LOG があれば、呼ばれた引数をそこに書き足す
+# GH_PROXY_CHECK=1 なら、本物の gh と同じく HTTPS_PROXY のプロキシ（http://<ホスト>:<ポート>）を通す（繋がらなければ proxyconnect のエラーで失敗する）。
+# GH_STATE/fail-<番号> があれば、その Discussion が閉じたかの問い合わせを失敗させる
 [[ -z "${GH_LOG:-}" ]] || printf '%s\n' "$*" >> "$GH_LOG"
 S="${GH_STATE:?}"
 mkdir -p "$S/issues" "$S/comments"
+if [[ "${GH_PROXY_CHECK:-}" == 1 && -n "${HTTPS_PROXY:-}" ]]; then
+  proxy="${HTTPS_PROXY#*://}"
+  proxy="${proxy%%/*}"
+  if ! (exec 3<>"/dev/tcp/${proxy%:*}/${proxy##*:}") 2>/dev/null; then
+    echo "Post \"https://api.github.com/graphql\": proxyconnect tcp: dial tcp ${proxy}: connect: connection refused" >&2
+    exit 1
+  fi
+fi
 
 jq_expr="" method="" body="" query="" number="" author="" label="" head=""
 positional=()
@@ -98,6 +108,10 @@ case "${positional[0]:-} ${positional[1]:-}" in
   "repo view") echo '{"nameWithOwner":"example/myapp-ios"}' | out ;;
   "api user") jq -n --arg login "${GH_VIEWER:-test}" '{login: $login}' | out ;;
   "api graphql")
+    if [[ "$query" == *'{ closed }'* && -e "$S/fail-$number" ]]; then
+      echo "GraphQL: テストで失敗させています (fail-$number)" >&2
+      exit 1
+    fi
     if [[ "$query" == *'{ closed }'* && -e "$S/hold-$number" ]]; then
       touch "$S/held-$number"
       while [[ -e "$S/hold-$number" ]]; do sleep 0.1; done
@@ -975,8 +989,8 @@ ok "Claude の利用上限のメッセージから、オーケストレーター
 # 見張り役は、ループのログの末尾に Claude の利用上限のメッセージがあれば、ループの状態を「上限で待機中」（解除の時刻つき）で書き、
 # 解除の時刻を過ぎたら resume で再開する。再開したループの見張り役が、いつもどおり最終 PR を作る
 limit_loop() { # $1=Discussion の番号 $2=epic。start して playbook と goal を用意する
-  local ctl="$WORK/repos/myapp-ralph-d$1-ctl"
-  manual start "$1" "$2" >/dev/null 2>&1 || fail "Discussion $1 の手動ループを start できない"
+  local ctl="$WORK/repos/myapp-ralph-d$1-ctl" out
+  out=$(manual start "$1" "$2" 2>&1) || fail "Discussion $1 の手動ループを start できない: $out"
   perl -pi -e 's/\{\{[A-Z_]+\}\}/X/g' "$ctl/.claude/ralph-playbook.local.md"
   printf '# ゴール\n\n- [ ] 【FEAT】テスト | label: enhancement\n' > "$ctl/.claude/ralph-goal.local.md"
 }
@@ -1363,6 +1377,145 @@ grep -q '裏で消しています' <<<"$OUT" && fail "ASKHUB_DELETE_DERIVED_DATA
 has_dd myapp-d133-a || fail "ASKHUB_DELETE_DERIVED_DATA=0 なのに、DerivedData などを消した"
 [[ "$(comment_count 133)" -eq 0 ]] || fail "ASKHUB_DELETE_DERIVED_DATA=0 のとき、ループの状態のコメントまで残した"
 ok "見張り役が動いていなかったループの ralph-dd は次の start が裏で消し、ASKHUB_DELETE_DERIVED_DATA=0 のときは消さない"
+
+# ---- launch したセッションのプロキシが消えた見張り役 -------------------------------------------------
+# launch / resume を流したシェルが、この Mac の中で待ち受けるプロキシ（セッションと一緒に消える）を HTTPS_PROXY で渡していると、
+# 見張り役の gh はそのプロキシを通る。プロキシが消えたら、見張り役はそれを外して直接繋ぎ、Discussion が閉じたのを見つけてコメントを消す（#39）
+start_proxy() { # この Mac の中で待ち受けるだけのプロキシを起動し、PROXY_PID と PROXY_PORT を決める
+  rm -f "$WORK/proxy.port" "$WORK/proxy.port.tmp"
+  perl -MIO::Socket::INET -e '
+    my $s = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => 0, Listen => 16, ReuseAddr => 1) or die "listen: $!";
+    open(my $f, ">", "$ARGV[0].tmp") or die "open: $!";
+    print $f $s->sockport;
+    close $f;
+    rename("$ARGV[0].tmp", $ARGV[0]) or die "rename: $!";
+    while (my $c = $s->accept) { close $c }' "$WORK/proxy.port" &
+  PROXY_PID=$!
+  wait_for test -s "$WORK/proxy.port" || fail "テスト用のプロキシを起動できない"
+  PROXY_PORT=$(cat "$WORK/proxy.port")
+}
+D150="$WORK/repos/myapp-ralph-d150-ctl"
+limit_loop 150 epic/proxy-fifty
+start_proxy
+: > "$WORK/gh.log"
+(
+  export GH_PROXY_CHECK=1 HTTPS_PROXY="http://127.0.0.1:$PROXY_PORT" STUB_LOOP=promise
+  manual launch 150 "SMOKE DONE" >/dev/null
+) || fail "Discussion 150 の launch が失敗した"
+LOG_150=$(loop_log "$D150")
+wait_watch "$LOG_150"
+grep -q '最終 PR を作りました' "$LOG_150" || fail "プロキシが生きている間に、見張り役が最終 PR を作っていない: $(cat "$LOG_150")"
+wait_for comment_has 150 '"state":"completed"' || fail "プロキシが生きている間に、ループの状態のコメントを完了にしていない: $(loop_comments 150)"
+grep -q 'プロキシ（' "$LOG_150" && fail "プロキシが生きているのに外した: $(cat "$LOG_150")"
+# launch したセッションを閉じた（プロキシが消えた）後に、最終 PR がマージされて Discussion が閉じる
+kill "$PROXY_PID"
+wait "$PROXY_PID" 2>/dev/null || true
+touch "$GH_STATE/closed-150"
+wait_watch_exit "$D150"
+[[ "$(comment_count 150)" -eq 0 ]] || fail "プロキシが消えた後に Discussion が閉じたのに、ループの状態のコメントを消していない: $(cat "$LOG_150")"
+grep -q "プロキシ（HTTPS_PROXY の 127.0.0.1:${PROXY_PORT}）に繋がらないため、外して GitHub に直接繋ぎます" "$LOG_150" \
+  || fail "プロキシを外したことをログに書いていない: $(cat "$LOG_150")"
+[[ "$(grep -c 'プロキシ（' "$LOG_150")" -eq 1 ]] || fail "プロキシを外したことを 2 回以上ログに書いた: $(cat "$LOG_150")"
+grep -q 'コメントを消しました' "$LOG_150" || fail "コメントを消したことをログに書いていない: $(cat "$LOG_150")"
+ok "launch したセッションのプロキシが消えたら、見張り役はプロキシを外して直接繋ぎ、Discussion が閉じたらコメントを消す"
+
+# 見張り役が起動した時点でプロキシが消えていても、最初の gh（リポジトリの特定）で落ちずに動く。
+# 見張り役を入れ替える（PID で止めて watch-final を流し直す）ときと同じく、動いている見張り役を止めてから、消えたプロキシを渡して起動し直す
+proc_exited() { ! kill -0 "$1" 2>/dev/null; }
+D152="$WORK/repos/myapp-ralph-d152-ctl"
+limit_loop 152 epic/proxy-fifty-two
+start_proxy
+(
+  export GH_PROXY_CHECK=1 HTTPS_PROXY="http://127.0.0.1:$PROXY_PORT" STUB_LOOP=promise
+  manual launch 152 "SMOKE DONE" >/dev/null
+) || fail "Discussion 152 の launch が失敗した"
+LOG_152=$(loop_log "$D152")
+wait_watch "$LOG_152"
+wait_for comment_has 152 '"state":"completed"' || fail "Discussion 152 のループの状態のコメントを完了にしていない: $(loop_comments 152)"
+kill "$(sed -n 's/^watch_pid=//p' "$D152/.claude/askhub-manual.local.txt" | tail -n 1)"
+kill "$PROXY_PID"
+wait "$PROXY_PID" 2>/dev/null || true
+(
+  export GH_PROXY_CHECK=1 HTTPS_PROXY="http://127.0.0.1:$PROXY_PORT"
+  manual watch-final 152 "$(cat "$D152/.claude/askhub-loop.pid")" "$LOG_152" >>"$LOG_152" 2>&1
+) &
+WATCH_152=$!
+touch "$GH_STATE/closed-152"
+wait_for proc_exited "$WATCH_152" || fail "プロキシが消えた後に起動した見張り役が終わらない: $(cat "$LOG_152")"
+[[ "$(comment_count 152)" -eq 0 ]] || fail "プロキシが消えた後に起動した見張り役が、ループの状態のコメントを消していない: $(cat "$LOG_152")"
+grep -q "プロキシ（HTTPS_PROXY の 127.0.0.1:${PROXY_PORT}）に繋がらないため" "$LOG_152" || fail "起動した見張り役が、プロキシを外したことをログに書いていない: $(cat "$LOG_152")"
+grep -q 'GitHub のリポジトリを特定できません' "$LOG_152" && fail "起動した見張り役が、リポジトリの特定で落ちた: $(cat "$LOG_152")"
+ok "見張り役が起動した時点でプロキシが消えていても、最初の gh の前に外して動く"
+
+# Discussion が閉じたかを確かめられないときは、gh のエラーをログに 1 回だけ書き、確かめられるようになったら、そのことも書く
+closed_queries() { grep -F '{ closed }' "$WORK/gh.log" | grep -c -- "n=$1" || true; }
+queried_again() { [[ "$(closed_queries "$1")" -ge $(($2 + 3)) ]]; } # Discussion $1 が閉じたかを、$2 回から 3 回以上確かめ直した
+D151="$WORK/repos/myapp-ralph-d151-ctl"
+limit_loop 151 epic/proxy-fifty-one
+: > "$WORK/gh.log"
+touch "$GH_STATE/fail-151"
+STUB_LOOP=promise manual launch 151 "SMOKE DONE" >/dev/null || fail "Discussion 151 の launch が失敗した"
+LOG_151=$(loop_log "$D151")
+wait_watch "$LOG_151"
+wait_for grep -q 'Discussion #151 が閉じたかを確かめられませんでした' "$LOG_151" || fail "確かめられなかったことをログに書いていない: $(cat "$LOG_151")"
+grep -q 'テストで失敗させています (fail-151)' "$LOG_151" || fail "確かめられなかったときの gh のエラーをログに書いていない: $(cat "$LOG_151")"
+# 何回か確かめ直しても、ログには 1 回だけ書く
+wait_for queried_again 151 "$(closed_queries 151)" || fail "確かめられなかった後に、確かめ直していない"
+[[ "$(grep -c '閉じたかを確かめられませんでした' "$LOG_151")" -eq 1 ]] || fail "確かめられなかったことを 2 回以上ログに書いた: $(cat "$LOG_151")"
+rm -f "$GH_STATE/fail-151"
+wait_for grep -q 'Discussion #151 が閉じたかを、また確かめられるようになりました' "$LOG_151" || fail "確かめられるようになったことをログに書いていない: $(cat "$LOG_151")"
+touch "$GH_STATE/closed-151"
+wait_watch_exit "$D151"
+[[ "$(comment_count 151)" -eq 0 ]] || fail "確かめられるようになった後に Discussion が閉じたのに、コメントを消していない: $(cat "$LOG_151")"
+ok "Discussion が閉じたかを確かめられないときは、gh のエラーをログに 1 回だけ書き、確かめられるようになったらそのことも書く"
+
+# ---- 手動ループの記録のロック ---------------------------------------------------------------------
+# launch / resume と見張り役が同時に記録を書いても値が消えないよう、記録の書き換えは持ち主の PID を指すロックで 1 つずつにする（#41）。
+# 持ち主が終わったロックは取り直し、動いている持ち主のロックは消さずに待ち、ロックを作れないときは待たずに失敗にする。
+# status（--stopping は状態のコメントを必ず書き直す）は、記録を書いてからコメントを書くので、ロックを待っている間はコメントを書かない
+D153="$WORK/repos/myapp-ralph-d153-ctl"
+limit_loop 153 epic/record-lock
+LOCK_153="$D153/.claude/askhub-manual.lock.local.txt"
+status_writes() { grep -c -F '"discussion":153,' "$WORK/gh.log" || true; }
+sleep 0 &
+DEAD_153=$!
+wait "$DEAD_153" || true
+ln -s "$DEAD_153" "$LOCK_153"
+: > "$WORK/gh.log"
+manual status 153 --stopping >"$WORK/status-153.out" 2>&1 || fail "持ち主が終わったロックが残っていると、status が失敗する: $(cat "$WORK/status-153.out")"
+[[ "$(status_writes)" -ge 1 ]] || fail "持ち主が終わったロックを取り直して、ループの状態のコメントを書いていない: $(cat "$WORK/status-153.out")"
+[[ ! -L "$LOCK_153" ]] || fail "持ち主が終わったロックを取り直した後に、ロックを外していない"
+sleep 600 &
+HOLDER_153=$!
+ln -s "$HOLDER_153" "$LOCK_153"
+: > "$WORK/gh.log"
+manual status 153 --stopping >"$WORK/status-153.out" 2>&1 &
+STATUS_153=$!
+wait_for grep -q -F -- '--label needs-answer' "$WORK/gh.log" || fail "status が回答待ちの PR を確かめていない: $(cat "$WORK/status-153.out")"
+sleep 2
+proc_exited "$STATUS_153" && fail "動いている持ち主のロックを待たずに、status が終わった: $(cat "$WORK/status-153.out")"
+[[ "$(readlink "$LOCK_153")" == "$HOLDER_153" ]] || fail "動いている持ち主のロックを消した"
+[[ "$(status_writes)" -eq 0 ]] || fail "ロックを待っている間に、ループの状態のコメントを書いた"
+rm -f "$LOCK_153"
+wait "$STATUS_153" || fail "ロックが外れた後の status が失敗した: $(cat "$WORK/status-153.out")"
+[[ "$(status_writes)" -ge 1 ]] || fail "ロックが外れた後に、ループの状態のコメントを書いていない"
+[[ ! -L "$LOCK_153" ]] || fail "status がロックを外していない"
+kill "$HOLDER_153"
+wait "$HOLDER_153" 2>/dev/null || true
+# 記録のディレクトリに書き込めない（ロックを作れない）ときは、待ち続けずに失敗にする（root は書き込めてしまうので確かめない）
+if [[ "$(id -u)" != 0 ]]; then
+  chmod 555 "$D153/.claude"
+  manual status 153 --stopping >"$WORK/status-153.out" 2>&1 &
+  STATUS_153=$!
+  if ! wait_for proc_exited "$STATUS_153"; then
+    chmod 755 "$D153/.claude"
+    fail "ロックを作れないのに、status が待ち続ける"
+  fi
+  chmod 755 "$D153/.claude"
+  if wait "$STATUS_153"; then fail "ロックを作れないのに、status が成功した: $(cat "$WORK/status-153.out")"; fi
+  grep -q 'のロック（.*）を作れません' "$WORK/status-153.out" || fail "ロックを作れないことを知らせていない: $(cat "$WORK/status-153.out")"
+fi
+ok "記録のロックは、持ち主が終わったものを取り直し、動いている持ち主のものは待ち、作れないときは待たずに失敗にする"
 
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e

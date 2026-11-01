@@ -72,6 +72,53 @@ STATUS_INTERVAL=600
 # Claude の利用上限で止まったループを、解除の時刻の何秒後に再開するか（解除の直後はまだ上限に当たることがあるので、少し空ける）
 USAGE_LIMIT_MARGIN="${ASKHUB_USAGE_LIMIT_MARGIN:-60}"
 
+# 見張り役がループのログに書く 1 行
+watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# 見張り役: プロキシの環境変数のうち、この Mac の中（127.*・localhost・::1）のポートを指していて、そこに繋がらないものを外す（GitHub に直接繋ぐ）。
+# 見張り役は launch / resume を流したシェルの環境を引き継ぐ。Claude Code をセッションごとに待ち受けるプロキシ経由で起動していると、
+# セッションを閉じたときにプロキシも消え、見張り役の gh が繋がらずに、Discussion が閉じたのを見落とし続ける（#39）。
+# 外の Mac のプロキシ（ネットワークの決まりで要ることがある）と、ポートを読み取れないものは触らない。
+# 外した変数は、このプロセスと、ここから流す final・resume（そのループと見張り役）には渡らない。外したことはループのログに書く（外した後は見ないので 1 回だけ）
+bypass_dead_local_proxy() {
+  local name value rest host port
+  for name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy; do
+    value="${!name:-}"
+    [[ -n "$value" ]] || continue
+    # スキーム（http:// など）・パス・ユーザー名とパスワードを除いて、ホストとポートを取り出す
+    rest="${value#*://}"
+    rest="${rest%%/*}"
+    rest="${rest##*@}"
+    if [[ "$rest" == \[* ]]; then
+      host="${rest%%]*}"
+      host="${host#\[}"
+      port="${rest#*]}"
+      port="${port#:}"
+    else
+      host="${rest%%:*}"
+      port=""
+      if [[ "$rest" == *:* ]]; then port="${rest#*:}"; fi
+    fi
+    [[ "$port" =~ ^[0-9]+$ ]] || continue
+    case "$host" in
+      127.* | localhost | ::1) ;;
+      *) continue ;;
+    esac
+    # 繋がれば、そのプロキシを使い続ける（launch / resume したセッションが生きている）
+    if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+      continue
+    fi
+    unset "$name"
+    # 値はログに書かない（ユーザー名とパスワードを含むことがある）
+    [[ "$host" != *:* ]] || host="[$host]"
+    watch_note "プロキシ（${name} の ${host}:${port}）に繋がらないため、外して GitHub に直接繋ぎます（launch / resume したセッションを閉じると、そのプロキシも消えることがあります）"
+  done
+  return 0
+}
+
+# 見張り役は、起動した直後に launch / resume したセッションが閉じていても動けるよう、最初の gh（下のリポジトリの特定）の前に確かめる
+[[ "$COMMAND" != watch-final ]] || bypass_dead_local_proxy
+
 REPOSITORY=$(cd "$MAIN" && gh repo view --json nameWithOwner --jq .nameWithOwner) || fail "GitHub のリポジトリを特定できません（gh auth status を確認してください）"
 OWNER="${REPOSITORY%%/*}"
 REPO="${REPOSITORY#*/}"
@@ -176,20 +223,65 @@ setup_worktrees() {
   (cd "$MAIN" && RALPH_LOOP_ID="$id" "$KIT_DIR/bin/ralph-setup.sh" "$1" "$BASE_BRANCH" >/dev/null)
 }
 
-# 記録（key=value）を読む・書く
+# 記録（key=value）を読む・書く。
+# 書き換えは一時ファイルに書いてから mv で置き換える。launch / resume と見張り役が同時に書くことがあるので（ループがすぐ終わったときなど）、
+# 読んでから置き換えるまでをロックで 1 つずつにし（でないと、後から置き換えたほうが先に書かれた行を消す）、
+# 一時ファイルも書き手ごとに別の名前にする（同じ名前だと、一方の mv がもう一方の一時ファイルを持っていき、後の mv が No such file or directory で落ちる。#41）
 state_get() { record_get "$STATE_FILE" "$1"; }
+# 記録のロックは、持ち主の PID を指すシンボリックリンク（作るのと持ち主を書くのが一度に済み、持ち主の分からない作りかけが無い）。
+# 名前は ralph-setup.sh が info/exclude に足す .claude/*.local.txt に合わせる（残っても git に載らない）。
+# 持ち主が終わっていれば（書き換えの途中で止められた）捨てて取り直す。動いている持ち主のロックは消さない。
+# 書き換えは一瞬で終わるので、動いている持ち主が 60 秒たっても外さなければ（PID の使い回し・止められたままのプロセス）、待つのをやめて失敗にする。
+# ロックが無いのに作れない（記録のディレクトリに書き込めないなど）ときも、待たずに失敗にする
+STATE_LOCK_OWNER=""
+state_lock() {
+  local lock="${STATE_FILE%.local.txt}.lock.local.txt" owner since=$SECONDS
+  # このシェルの PID（サブシェルの中でも。bash 3.2 には BASHPID が無く、$$ はサブシェルの中でも親の PID になる）
+  STATE_LOCK_OWNER=$(exec /bin/sh -c 'echo "$PPID"')
+  while :; do
+    if ln -s "$STATE_LOCK_OWNER" "$lock" 2>/dev/null; then return 0; fi
+    if ! owner=$(readlink "$lock" 2>/dev/null); then
+      # 持ち主がちょうど外したときに備えて、もう一度だけ試す
+      if ln -s "$STATE_LOCK_OWNER" "$lock" 2>/dev/null; then return 0; fi
+      if [[ ! -L "$lock" ]]; then
+        warn "手動ループの記録のロック（${lock}）を作れません（記録のディレクトリに書き込めるか確かめてください）"
+        return 1
+      fi
+    elif [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+      # ほかの待ち手が先に取り直していないか、捨てる直前に確かめる
+      if [[ "$(readlink "$lock" 2>/dev/null || true)" == "$owner" ]]; then rm -f "$lock"; fi
+      continue
+    elif (( SECONDS - since >= 60 )); then
+      warn "手動ループの記録のロック（${lock}）を、PID ${owner} が 60 秒たっても外しません。記録を書き換えずにやめます"
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+# 自分のロックだけを外す（持ち主が終わったとみなされて、ほかの書き手が取り直していたら消さない）
+state_unlock() {
+  local lock="${STATE_FILE%.local.txt}.lock.local.txt"
+  if [[ "$(readlink "$lock" 2>/dev/null || true)" == "$STATE_LOCK_OWNER" ]]; then rm -f "$lock"; fi
+}
 state_set() {
   mkdir -p "$(dirname "$STATE_FILE")"
+  state_lock || return 1
   touch "$STATE_FILE"
-  local rest
+  local rest tmp
   rest=$(grep -v "^$1=" "$STATE_FILE" || true)
-  { [[ -n "$rest" ]] && printf '%s\n' "$rest"; printf '%s=%s\n' "$1" "$2"; } > "$STATE_FILE.tmp"
-  mv "$STATE_FILE.tmp" "$STATE_FILE"
+  tmp=$(mktemp "$STATE_FILE.XXXXXX")
+  { [[ -n "$rest" ]] && printf '%s\n' "$rest"; printf '%s=%s\n' "$1" "$2"; } > "$tmp"
+  mv "$tmp" "$STATE_FILE"
+  state_unlock
 }
 state_unset() {
   [[ -f "$STATE_FILE" ]] || return 0
-  grep -v "^$1=" "$STATE_FILE" > "$STATE_FILE.tmp" || true
-  mv "$STATE_FILE.tmp" "$STATE_FILE"
+  state_lock || return 1
+  local tmp
+  tmp=$(mktemp "$STATE_FILE.XXXXXX")
+  grep -v "^$1=" "$STATE_FILE" > "$tmp" || true
+  mv "$tmp" "$STATE_FILE"
+  state_unlock
 }
 
 viewer() { gh api user --jq .login; }
@@ -925,9 +1017,6 @@ start_final_watch() {
   fi
 }
 
-# 見張り役がループのログに書く 1 行
-watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
-
 # 見張り役: ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを待ち、
 # このループのスロット用の Simulator と DerivedData など（ralph-dd）を消して、このループを終える。
 # resume などで別のループが起動した・end で終えたら、何もせずに終わる（そちらに任せる）。
@@ -935,7 +1024,7 @@ watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 # 引き継ぐのは、このループの記録が残っているときだけ（固定パスの作業場所をオーケストレーターが作り直して、自分の PID を書いたときに終わらない）。
 # $1 が true（ループが完了語を出して終わった）なら、待っている間に回答待ちの PR の ask の回答を確かめ、付いていれば resume で再開する
 watch_until_closed() {
-  local answers="${1:-false}" noted=false slots_cleaned=false pid ours interval
+  local answers="${1:-false}" noted=false slots_cleaned=false check_failed=false pid ours interval closed
   while :; do
     # 回答待ちの ask があるうちは、回答を早く拾えるよう短い間隔で確かめる
     interval="${ASKHUB_CLOSE_WATCH_INTERVAL:-600}"
@@ -950,7 +1039,24 @@ watch_until_closed() {
     if [[ "$ours" == true ]] && { [[ -n "$pid" && "$pid" != "$WATCHED" ]] || [[ -n "$(state_get ended_at)" ]]; }; then
       return 0
     fi
-    if [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" != true ]]; then
+    bypass_dead_local_proxy
+    # 確かめられなかった（通信のエラーなど）ときは、閉じていないとみなして次の確認でやり直す。
+    # gh のエラーはログに 1 回だけ書き（10 分ごとに書かない）、確かめられるようになったら、そのことも書く
+    if closed=$(discussion_closed "$LOOP_DISCUSSION" 2>&1); then
+      if [[ "$check_failed" == true ]]; then
+        watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じたかを、また確かめられるようになりました"
+        check_failed=false
+      fi
+      # gh が知らせを標準エラーに出しても取り違えないよう、true の行があるかで見る
+      if grep -qx true <<<"$closed"; then closed=true; else closed=false; fi
+    else
+      if [[ "$check_failed" != true ]]; then
+        watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じたかを確かめられませんでした（確かめられるまで、次の確認でやり直します）: $(grep -v '^[[:space:]]*$' <<<"$closed" | tail -n 1)"
+        check_failed=true
+      fi
+      closed=false
+    fi
+    if [[ "$closed" != true ]]; then
       # 再開したら、このループの見張りは新しいループの見張り役に任せる
       if [[ "$answers" == true && "$ours" == true ]] && resume_after_answer; then
         return 0
@@ -1085,6 +1191,7 @@ resume_after_usage_limit() {
     if [[ ! -f "$LOOP_STATE" ]]; then
       watch_note "ループが止められた（state ファイルが無い）ため、自動では再開しません（続けるなら scripts/askhub-manual.sh resume ${LOOP_DISCUSSION}）"
       state_unset usage_limited_until
+      bypass_dead_local_proxy
       write_status false true
       return 1
     fi
@@ -1093,6 +1200,8 @@ resume_after_usage_limit() {
     sleep "${ASKHUB_USAGE_LIMIT_INTERVAL:-60}"
   done
   state_unset usage_limited_until
+  # 解除を待つ間（数時間）に launch / resume したセッションが閉じていたら、そのプロキシは消えている（確認と再開の前に外す）
+  bypass_dead_local_proxy
   if [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" == true ]]; then
     watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じているため、自動では再開しません"
     return 1
@@ -1252,6 +1361,8 @@ NEXT
     while kill -0 "$WATCHED" 2>/dev/null; do
       sleep "${ASKHUB_FINAL_WATCH_INTERVAL:-30}"
     done
+    # ループが動いている間に launch / resume したセッションが閉じていたら、そのプロキシは消えている（最終 PR・状態の書き出しの前に外す）
+    bypass_dead_local_proxy
     # 見張っている間に resume などで別のループが起動していたら、そのループの見張り役に任せる
     if [[ "$({ tr -d '[:space:]' < "$PID_FILE"; } 2>/dev/null || true)" != "$WATCHED" ]]; then
       watch_note "別のループが起動しているため、最終 PR はそのループが終わってから作ります"
