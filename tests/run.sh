@@ -1421,6 +1421,7 @@ ok "launch したセッションのプロキシが消えたら、見張り役は
 
 # Discussion が閉じたかを確かめられないときは、gh のエラーをログに 1 回だけ書き、確かめられるようになったら、そのことも書く
 closed_queries() { grep -F '{ closed }' "$WORK/gh.log" | grep -c -- "n=$1" || true; }
+queried_again() { [[ "$(closed_queries "$1")" -ge $(($2 + 3)) ]]; } # Discussion $1 が閉じたかを、$2 回から 3 回以上確かめ直した
 D151="$WORK/repos/myapp-ralph-d151-ctl"
 limit_loop 151 epic/proxy-fifty-one
 : > "$WORK/gh.log"
@@ -1431,8 +1432,7 @@ wait_watch "$LOG_151"
 wait_for grep -q 'Discussion #151 が閉じたかを確かめられませんでした' "$LOG_151" || fail "確かめられなかったことをログに書いていない: $(cat "$LOG_151")"
 grep -q 'テストで失敗させています (fail-151)' "$LOG_151" || fail "確かめられなかったときの gh のエラーをログに書いていない: $(cat "$LOG_151")"
 # 何回か確かめ直しても、ログには 1 回だけ書く
-QUERIES=$(closed_queries 151)
-wait_for eval '[[ "$(closed_queries 151)" -ge $((QUERIES + 3)) ]]' || fail "確かめられなかった後に、確かめ直していない"
+wait_for queried_again 151 "$(closed_queries 151)" || fail "確かめられなかった後に、確かめ直していない"
 [[ "$(grep -c '閉じたかを確かめられませんでした' "$LOG_151")" -eq 1 ]] || fail "確かめられなかったことを 2 回以上ログに書いた: $(cat "$LOG_151")"
 rm -f "$GH_STATE/fail-151"
 wait_for grep -q 'Discussion #151 が閉じたかを、また確かめられるようになりました' "$LOG_151" || fail "確かめられるようになったことをログに書いていない: $(cat "$LOG_151")"
