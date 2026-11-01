@@ -976,7 +976,7 @@ bypass_dead_local_proxy() {
 # 引き継ぐのは、このループの記録が残っているときだけ（固定パスの作業場所をオーケストレーターが作り直して、自分の PID を書いたときに終わらない）。
 # $1 が true（ループが完了語を出して終わった）なら、待っている間に回答待ちの PR の ask の回答を確かめ、付いていれば resume で再開する
 watch_until_closed() {
-  local answers="${1:-false}" noted=false slots_cleaned=false pid ours interval
+  local answers="${1:-false}" noted=false slots_cleaned=false check_failed=false pid ours interval closed
   while :; do
     # 回答待ちの ask があるうちは、回答を早く拾えるよう短い間隔で確かめる
     interval="${ASKHUB_CLOSE_WATCH_INTERVAL:-600}"
@@ -992,7 +992,23 @@ watch_until_closed() {
       return 0
     fi
     bypass_dead_local_proxy
-    if [[ "$(discussion_closed "$LOOP_DISCUSSION" 2>/dev/null || true)" != true ]]; then
+    # 確かめられなかった（通信のエラーなど）ときは、閉じていないとみなして次の確認でやり直す。
+    # gh のエラーはログに 1 回だけ書き（10 分ごとに書かない）、確かめられるようになったら、そのことも書く
+    if closed=$(discussion_closed "$LOOP_DISCUSSION" 2>&1); then
+      if [[ "$check_failed" == true ]]; then
+        watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じたかを、また確かめられるようになりました"
+        check_failed=false
+      fi
+      # gh が知らせを標準エラーに出しても取り違えないよう、true の行があるかで見る
+      if grep -qx true <<<"$closed"; then closed=true; else closed=false; fi
+    else
+      if [[ "$check_failed" != true ]]; then
+        watch_note "ゴール元の Discussion #$LOOP_DISCUSSION が閉じたかを確かめられませんでした（確かめられるまで、次の確認でやり直します）: $(grep -v '^[[:space:]]*$' <<<"$closed" | tail -n 1)"
+        check_failed=true
+      fi
+      closed=false
+    fi
+    if [[ "$closed" != true ]]; then
       # 再開したら、このループの見張りは新しいループの見張り役に任せる
       if [[ "$answers" == true && "$ours" == true ]] && resume_after_answer; then
         return 0
