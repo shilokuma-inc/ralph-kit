@@ -72,6 +72,53 @@ STATUS_INTERVAL=600
 # Claude の利用上限で止まったループを、解除の時刻の何秒後に再開するか（解除の直後はまだ上限に当たることがあるので、少し空ける）
 USAGE_LIMIT_MARGIN="${ASKHUB_USAGE_LIMIT_MARGIN:-60}"
 
+# 見張り役がループのログに書く 1 行
+watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# 見張り役: プロキシの環境変数のうち、この Mac の中（127.*・localhost・::1）のポートを指していて、そこに繋がらないものを外す（GitHub に直接繋ぐ）。
+# 見張り役は launch / resume を流したシェルの環境を引き継ぐ。Claude Code をセッションごとに待ち受けるプロキシ経由で起動していると、
+# セッションを閉じたときにプロキシも消え、見張り役の gh が繋がらずに、Discussion が閉じたのを見落とし続ける（#39）。
+# 外の Mac のプロキシ（ネットワークの決まりで要ることがある）と、ポートを読み取れないものは触らない。
+# 外した変数は、このプロセスと、ここから流す final・resume（そのループと見張り役）には渡らない。外したことはループのログに書く（外した後は見ないので 1 回だけ）
+bypass_dead_local_proxy() {
+  local name value rest host port
+  for name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy; do
+    value="${!name:-}"
+    [[ -n "$value" ]] || continue
+    # スキーム（http:// など）・パス・ユーザー名とパスワードを除いて、ホストとポートを取り出す
+    rest="${value#*://}"
+    rest="${rest%%/*}"
+    rest="${rest##*@}"
+    if [[ "$rest" == \[* ]]; then
+      host="${rest%%]*}"
+      host="${host#\[}"
+      port="${rest#*]}"
+      port="${port#:}"
+    else
+      host="${rest%%:*}"
+      port=""
+      if [[ "$rest" == *:* ]]; then port="${rest#*:}"; fi
+    fi
+    [[ "$port" =~ ^[0-9]+$ ]] || continue
+    case "$host" in
+      127.* | localhost | ::1) ;;
+      *) continue ;;
+    esac
+    # 繋がれば、そのプロキシを使い続ける（launch / resume したセッションが生きている）
+    if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+      continue
+    fi
+    unset "$name"
+    # 値はログに書かない（ユーザー名とパスワードを含むことがある）
+    [[ "$host" != *:* ]] || host="[$host]"
+    watch_note "プロキシ（${name} の ${host}:${port}）に繋がらないため、外して GitHub に直接繋ぎます（launch / resume したセッションを閉じると、そのプロキシも消えることがあります）"
+  done
+  return 0
+}
+
+# 見張り役は、起動した直後に launch / resume したセッションが閉じていても動けるよう、最初の gh（下のリポジトリの特定）の前に確かめる
+[[ "$COMMAND" != watch-final ]] || bypass_dead_local_proxy
+
 REPOSITORY=$(cd "$MAIN" && gh repo view --json nameWithOwner --jq .nameWithOwner) || fail "GitHub のリポジトリを特定できません（gh auth status を確認してください）"
 OWNER="${REPOSITORY%%/*}"
 REPO="${REPOSITORY#*/}"
@@ -923,50 +970,6 @@ start_final_watch() {
   else
     echo "ループが完了語を出して終わったら、最終 PR を自動で作ります（作れなかったときは scripts/askhub-manual.sh final ${LOOP_DISCUSSION}）"
   fi
-}
-
-# 見張り役がループのログに書く 1 行
-watch_note() { echo "[askhub-manual $(date '+%Y-%m-%d %H:%M:%S')] $*"; }
-
-# 見張り役: プロキシの環境変数のうち、この Mac の中（127.*・localhost・::1）のポートを指していて、そこに繋がらないものを外す（GitHub に直接繋ぐ）。
-# 見張り役は launch / resume を流したシェルの環境を引き継ぐ。Claude Code をセッションごとに待ち受けるプロキシ経由で起動していると、
-# セッションを閉じたときにプロキシも消え、見張り役の gh が繋がらずに、Discussion が閉じたのを見落とし続ける（#39）。
-# 外の Mac のプロキシ（ネットワークの決まりで要ることがある）と、ポートを読み取れないものは触らない。
-# 外した変数は、このプロセスと、ここから流す final・resume（そのループと見張り役）には渡らない。外したことはループのログに書く（外した後は見ないので 1 回だけ）
-bypass_dead_local_proxy() {
-  local name value rest host port
-  for name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy; do
-    value="${!name:-}"
-    [[ -n "$value" ]] || continue
-    # スキーム（http:// など）・パス・ユーザー名とパスワードを除いて、ホストとポートを取り出す
-    rest="${value#*://}"
-    rest="${rest%%/*}"
-    rest="${rest##*@}"
-    if [[ "$rest" == \[* ]]; then
-      host="${rest%%]*}"
-      host="${host#\[}"
-      port="${rest#*]}"
-      port="${port#:}"
-    else
-      host="${rest%%:*}"
-      port=""
-      if [[ "$rest" == *:* ]]; then port="${rest#*:}"; fi
-    fi
-    [[ "$port" =~ ^[0-9]+$ ]] || continue
-    case "$host" in
-      127.* | localhost | ::1) ;;
-      *) continue ;;
-    esac
-    # 繋がれば、そのプロキシを使い続ける（launch / resume したセッションが生きている）
-    if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
-      continue
-    fi
-    unset "$name"
-    # 値はログに書かない（ユーザー名とパスワードを含むことがある）
-    [[ "$host" != *:* ]] || host="[$host]"
-    watch_note "プロキシ（${name} の ${host}:${port}）に繋がらないため、外して GitHub に直接繋ぎます（launch / resume したセッションを閉じると、そのプロキシも消えることがあります）"
-  done
-  return 0
 }
 
 # 見張り役: ゴール元の Discussion が閉じる（最終 PR のマージでワークフローが閉じる・担当者が閉じる）のを待ち、
