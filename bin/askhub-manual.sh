@@ -228,22 +228,44 @@ setup_worktrees() {
 # 読んでから置き換えるまでをロックで 1 つずつにし（でないと、後から置き換えたほうが先に書かれた行を消す）、
 # 一時ファイルも書き手ごとに別の名前にする（同じ名前だと、一方の mv がもう一方の一時ファイルを持っていき、後の mv が No such file or directory で落ちる。#41）
 state_get() { record_get "$STATE_FILE" "$1"; }
-# ロックは記録の横のディレクトリ（mkdir は取れたか取れなかったかが一度に決まる。空のディレクトリは git に載らない）。
-# 書き換えは一瞬で終わるので、30 秒待っても取れなければ（負荷の高い Mac で、ほかの書き手を何人か待つことはある）、持ち主が書き換えの途中で止められて残ったものとみなして捨て、取り直す
+# 記録のロックは、持ち主の PID を指すシンボリックリンク（作るのと持ち主を書くのが一度に済み、持ち主の分からない作りかけが無い）。
+# 名前は ralph-setup.sh が info/exclude に足す .claude/*.local.txt に合わせる（残っても git に載らない）。
+# 持ち主が終わっていれば（書き換えの途中で止められた）捨てて取り直す。動いている持ち主のロックは消さない。
+# 書き換えは一瞬で終わるので、動いている持ち主が 60 秒たっても外さなければ（PID の使い回し・止められたままのプロセス）、待つのをやめて失敗にする。
+# ロックが無いのに作れない（記録のディレクトリに書き込めないなど）ときも、待たずに失敗にする
+STATE_LOCK_OWNER=""
 state_lock() {
-  local since=$SECONDS
-  until mkdir "$STATE_FILE.lock" 2>/dev/null; do
-    if (( SECONDS - since >= 30 )); then
-      rmdir "$STATE_FILE.lock" 2>/dev/null || true
-      since=$SECONDS
+  local lock="${STATE_FILE%.local.txt}.lock.local.txt" owner since=$SECONDS
+  # このシェルの PID（サブシェルの中でも。bash 3.2 には BASHPID が無く、$$ はサブシェルの中でも親の PID になる）
+  STATE_LOCK_OWNER=$(exec /bin/sh -c 'echo "$PPID"')
+  while :; do
+    if ln -s "$STATE_LOCK_OWNER" "$lock" 2>/dev/null; then return 0; fi
+    if ! owner=$(readlink "$lock" 2>/dev/null); then
+      # 持ち主がちょうど外したときに備えて、もう一度だけ試す
+      if ln -s "$STATE_LOCK_OWNER" "$lock" 2>/dev/null; then return 0; fi
+      if [[ ! -L "$lock" ]]; then
+        warn "手動ループの記録のロック（${lock}）を作れません（記録のディレクトリに書き込めるか確かめてください）"
+        return 1
+      fi
+    elif [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+      # ほかの待ち手が先に取り直していないか、捨てる直前に確かめる
+      if [[ "$(readlink "$lock" 2>/dev/null || true)" == "$owner" ]]; then rm -f "$lock"; fi
+      continue
+    elif (( SECONDS - since >= 60 )); then
+      warn "手動ループの記録のロック（${lock}）を、PID ${owner} が 60 秒たっても外しません。記録を書き換えずにやめます"
+      return 1
     fi
     sleep 0.1
   done
 }
-state_unlock() { rmdir "$STATE_FILE.lock" 2>/dev/null || true; }
+# 自分のロックだけを外す（持ち主が終わったとみなされて、ほかの書き手が取り直していたら消さない）
+state_unlock() {
+  local lock="${STATE_FILE%.local.txt}.lock.local.txt"
+  if [[ "$(readlink "$lock" 2>/dev/null || true)" == "$STATE_LOCK_OWNER" ]]; then rm -f "$lock"; fi
+}
 state_set() {
   mkdir -p "$(dirname "$STATE_FILE")"
-  state_lock
+  state_lock || return 1
   touch "$STATE_FILE"
   local rest tmp
   rest=$(grep -v "^$1=" "$STATE_FILE" || true)
@@ -254,7 +276,7 @@ state_set() {
 }
 state_unset() {
   [[ -f "$STATE_FILE" ]] || return 0
-  state_lock
+  state_lock || return 1
   local tmp
   tmp=$(mktemp "$STATE_FILE.XXXXXX")
   grep -v "^$1=" "$STATE_FILE" > "$tmp" || true
