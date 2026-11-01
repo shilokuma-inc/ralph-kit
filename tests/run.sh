@@ -1419,6 +1419,34 @@ grep -q "プロキシ（HTTPS_PROXY の 127.0.0.1:${PROXY_PORT}）に繋がら�
 grep -q 'コメントを消しました' "$LOG_150" || fail "コメントを消したことをログに書いていない: $(cat "$LOG_150")"
 ok "launch したセッションのプロキシが消えたら、見張り役はプロキシを外して直接繋ぎ、Discussion が閉じたらコメントを消す"
 
+# 見張り役が起動した時点でプロキシが消えていても、最初の gh（リポジトリの特定）で落ちずに動く。
+# 見張り役を入れ替える（PID で止めて watch-final を流し直す）ときと同じく、動いている見張り役を止めてから、消えたプロキシを渡して起動し直す
+proc_exited() { ! kill -0 "$1" 2>/dev/null; }
+D152="$WORK/repos/myapp-ralph-d152-ctl"
+limit_loop 152 epic/proxy-fifty-two
+start_proxy
+(
+  export GH_PROXY_CHECK=1 HTTPS_PROXY="http://127.0.0.1:$PROXY_PORT" STUB_LOOP=promise
+  manual launch 152 "SMOKE DONE" >/dev/null
+) || fail "Discussion 152 の launch が失敗した"
+LOG_152=$(loop_log "$D152")
+wait_watch "$LOG_152"
+wait_for comment_has 152 '"state":"completed"' || fail "Discussion 152 のループの状態のコメントを完了にしていない: $(loop_comments 152)"
+kill "$(sed -n 's/^watch_pid=//p' "$D152/.claude/askhub-manual.local.txt" | tail -n 1)"
+kill "$PROXY_PID"
+wait "$PROXY_PID" 2>/dev/null || true
+(
+  export GH_PROXY_CHECK=1 HTTPS_PROXY="http://127.0.0.1:$PROXY_PORT"
+  manual watch-final 152 "$(cat "$D152/.claude/askhub-loop.pid")" "$LOG_152" >>"$LOG_152" 2>&1
+) &
+WATCH_152=$!
+touch "$GH_STATE/closed-152"
+wait_for proc_exited "$WATCH_152" || fail "プロキシが消えた後に起動した見張り役が終わらない: $(cat "$LOG_152")"
+[[ "$(comment_count 152)" -eq 0 ]] || fail "プロキシが消えた後に起動した見張り役が、ループの状態のコメントを消していない: $(cat "$LOG_152")"
+grep -q "プロキシ（HTTPS_PROXY の 127.0.0.1:${PROXY_PORT}）に繋がらないため" "$LOG_152" || fail "起動した見張り役が、プロキシを外したことをログに書いていない: $(cat "$LOG_152")"
+grep -q 'GitHub のリポジトリを特定できません' "$LOG_152" && fail "起動した見張り役が、リポジトリの特定で落ちた: $(cat "$LOG_152")"
+ok "見張り役が起動した時点でプロキシが消えていても、最初の gh の前に外して動く"
+
 # Discussion が閉じたかを確かめられないときは、gh のエラーをログに 1 回だけ書き、確かめられるようになったら、そのことも書く
 closed_queries() { grep -F '{ closed }' "$WORK/gh.log" | grep -c -- "n=$1" || true; }
 queried_again() { [[ "$(closed_queries "$1")" -ge $(($2 + 3)) ]]; } # Discussion $1 が閉じたかを、$2 回から 3 回以上確かめ直した
