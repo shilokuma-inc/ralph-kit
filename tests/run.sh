@@ -1469,6 +1469,54 @@ wait_watch_exit "$D151"
 [[ "$(comment_count 151)" -eq 0 ]] || fail "確かめられるようになった後に Discussion が閉じたのに、コメントを消していない: $(cat "$LOG_151")"
 ok "Discussion が閉じたかを確かめられないときは、gh のエラーをログに 1 回だけ書き、確かめられるようになったらそのことも書く"
 
+# ---- 手動ループの記録のロック ---------------------------------------------------------------------
+# launch / resume と見張り役が同時に記録を書いても値が消えないよう、記録の書き換えは持ち主の PID を指すロックで 1 つずつにする（#41）。
+# 持ち主が終わったロックは取り直し、動いている持ち主のロックは消さずに待ち、ロックを作れないときは待たずに失敗にする。
+# status（--stopping は状態のコメントを必ず書き直す）は、記録を書いてからコメントを書くので、ロックを待っている間はコメントを書かない
+D153="$WORK/repos/myapp-ralph-d153-ctl"
+limit_loop 153 epic/record-lock
+LOCK_153="$D153/.claude/askhub-manual.lock.local.txt"
+status_writes() { grep -c -F '"discussion":153,' "$WORK/gh.log" || true; }
+sleep 0 &
+DEAD_153=$!
+wait "$DEAD_153" || true
+ln -s "$DEAD_153" "$LOCK_153"
+: > "$WORK/gh.log"
+manual status 153 --stopping >"$WORK/status-153.out" 2>&1 || fail "持ち主が終わったロックが残っていると、status が失敗する: $(cat "$WORK/status-153.out")"
+[[ "$(status_writes)" -ge 1 ]] || fail "持ち主が終わったロックを取り直して、ループの状態のコメントを書いていない: $(cat "$WORK/status-153.out")"
+[[ ! -L "$LOCK_153" ]] || fail "持ち主が終わったロックを取り直した後に、ロックを外していない"
+sleep 600 &
+HOLDER_153=$!
+ln -s "$HOLDER_153" "$LOCK_153"
+: > "$WORK/gh.log"
+manual status 153 --stopping >"$WORK/status-153.out" 2>&1 &
+STATUS_153=$!
+wait_for grep -q -F -- '--label needs-answer' "$WORK/gh.log" || fail "status が回答待ちの PR を確かめていない: $(cat "$WORK/status-153.out")"
+sleep 2
+proc_exited "$STATUS_153" && fail "動いている持ち主のロックを待たずに、status が終わった: $(cat "$WORK/status-153.out")"
+[[ "$(readlink "$LOCK_153")" == "$HOLDER_153" ]] || fail "動いている持ち主のロックを消した"
+[[ "$(status_writes)" -eq 0 ]] || fail "ロックを待っている間に、ループの状態のコメントを書いた"
+rm -f "$LOCK_153"
+wait "$STATUS_153" || fail "ロックが外れた後の status が失敗した: $(cat "$WORK/status-153.out")"
+[[ "$(status_writes)" -ge 1 ]] || fail "ロックが外れた後に、ループの状態のコメントを書いていない"
+[[ ! -L "$LOCK_153" ]] || fail "status がロックを外していない"
+kill "$HOLDER_153"
+wait "$HOLDER_153" 2>/dev/null || true
+# 記録のディレクトリに書き込めない（ロックを作れない）ときは、待ち続けずに失敗にする（root は書き込めてしまうので確かめない）
+if [[ "$(id -u)" != 0 ]]; then
+  chmod 555 "$D153/.claude"
+  manual status 153 --stopping >"$WORK/status-153.out" 2>&1 &
+  STATUS_153=$!
+  if ! wait_for proc_exited "$STATUS_153"; then
+    chmod 755 "$D153/.claude"
+    fail "ロックを作れないのに、status が待ち続ける"
+  fi
+  chmod 755 "$D153/.claude"
+  if wait "$STATUS_153"; then fail "ロックを作れないのに、status が成功した: $(cat "$WORK/status-153.out")"; fi
+  grep -q 'のロック（.*）を作れません' "$WORK/status-153.out" || fail "ロックを作れないことを知らせていない: $(cat "$WORK/status-153.out")"
+fi
+ok "記録のロックは、持ち主が終わったものを取り直し、動いている持ち主のものは待ち、作れないときは待たずに失敗にする"
+
 # askhub-manual.sh は中継から呼べる（引数なしは使い方を出して 64 で終わる）
 set +e
 (cd "$APP" && scripts/askhub-manual.sh >/dev/null 2>&1)
