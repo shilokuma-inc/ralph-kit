@@ -1,5 +1,10 @@
 # ralph-kit
 
+> [!IMPORTANT]
+> **このリポジトリは使っていません（2026-11-11 にアーカイブ）。** ループの仕組みは、新しい AskHub（司令塔・ワーカー・状態リポジトリ）に置き換えました。
+> 設計と運用は [shilokuma-inc/ask-hub-apple の docs/renewal](https://github.com/shilokuma-inc/ask-hub-apple/tree/develop/docs/renewal) を見てください。
+> 各リポジトリに残っている中継のスクリプト（`scripts/ralph-*.sh`・`scripts/askhub-manual.sh`）と `close-goal-discussion.yml` は、そのリポジトリを新しい AskHub に移すときに外します。
+
 [ralph-loop](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/ralph-loop) で
 自律的に実装を回すための一式（playbook・スクリプト・ワークフロー）の正本。各アプリのリポジトリ（shilokuma-inc 以外の organization のものも含む）は、
 このリポジトリをコピーせずに、中継スクリプトで呼んで使う。設計の根拠と、実際に踏んだ落とし穴は
